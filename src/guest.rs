@@ -1,20 +1,18 @@
 //! Guest implementation.
 
-use crate::{read_event, write_event, Guest, GuestRequest, HostRequest};
+use crate::{read_event, Guest, HostRequest};
 use anyhow::{anyhow, Context, Result};
-use tokio::{
-    io::AsyncReadExt,
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpStream,
-    },
-};
-use tokio_vsock::{ReadHalf, SockAddr, VsockListener, VsockStream, WriteHalf};
+use tokio::net::TcpStream;
+use tokio_vsock::{SockAddr, VsockListener, VsockStream};
 
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
     // Set up a vsock listener
-    info!(context = command.context_id, port = command.command_port, "listening for events");
+    info!(
+        context = command.context_id,
+        port = command.command_port,
+        "listening for events"
+    );
     let mut listener = VsockListener::bind(command.context_id, command.command_port)
         .context("unable to bind vsock listener")?;
 
@@ -58,7 +56,12 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
 
     // Forward data
     debug!(peer = peer_address.to_string(), "forwarding data to host");
-    tokio::io::copy_bidirectional(&mut vsock, &mut stream).await.context("unable to forward data to host")?;
-    debug!(peer = peer_address.to_string(), "terminated forwarding to host");
+    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
+        .await
+        .context("unable to forward data to host")?;
+    debug!(
+        peer = peer_address.to_string(),
+        "terminated forwarding to host"
+    );
     Ok(())
 }

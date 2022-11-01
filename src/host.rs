@@ -1,17 +1,14 @@
 //! Host implementation.
 
-use crate::{read_event, write_event, GuestRequest, Host, HostRequest};
+use crate::{write_event, Host, HostRequest};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpListener, TcpStream,
-    },
+    io::AsyncBufReadExt,
+    net::{TcpListener, TcpStream},
 };
-use tokio_vsock::{ReadHalf, VsockStream, WriteHalf};
+use tokio_vsock::VsockStream;
 
 /// Execute the host endpoint.
 pub async fn execute(command: &Host) -> Result<()> {
@@ -147,6 +144,9 @@ async fn process_client(
     tokio::io::copy_bidirectional(&mut vsock, &mut stream)
         .await
         .context("unable to forward data to guest")?;
-    debug!(peer = peer_address.to_string(), "terminated forwarding to guest");
+    debug!(
+        peer = peer_address.to_string(),
+        "terminated forwarding to guest"
+    );
     Ok(())
 }
