@@ -1,0 +1,5 @@
+[target.mips-unknown-linux-musl]
+linker = "/usr/bin/mips64-linux-gnu-gcc"
+
+[target.mips64-unknown-linux-muslabi64]
+linker = "/usr/bin/mips64-linux-gnu-gcc"
