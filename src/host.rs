@@ -45,8 +45,8 @@ pub async fn execute(command: &Host) -> Result<()> {
             };
 
             // Create a server and vsock bridge
-            let external_address = if cs.len() > 3 {
-                match cs[3].parse() {
+            let external_address = if let Some(x) = cs.get(3) {
+                match x.as_str().parse() {
                     Ok(x) => x,
                     Err(e) => {
                         error!("unable to parse external address {}: {e}", &cs[3]);

@@ -4,6 +4,7 @@
 extern crate tracing;
 
 use anyhow::{Context, Result};
+use daemonize::Daemonize;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path::PathBuf;
 use std::{net::SocketAddr, time::Duration};
@@ -23,6 +24,9 @@ const VSOCK_READ_TIMEOUT_SECS: u64 = 60;
 #[derive(StructOpt)]
 #[structopt(rename_all = "snake_case")]
 struct Config {
+    /// Daemonize.
+    #[structopt(short, long)]
+    daemonize: bool,
     #[structopt(subcommand)]
     command: Command,
 }
@@ -85,19 +89,27 @@ pub enum HostRequest {
 }
 
 /// Main.
-#[tokio::main]
-async fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let conf = Config::from_args();
-    let result = match conf.command {
-        Command::Guest(ref command) => guest::execute(command).await,
-        Command::Host(ref command) => host::execute(command).await,
-    };
-
-    if let Err(e) = result {
-        error!("{e:?}");
-        ::std::process::exit(1);
+    if conf.daemonize {
+        Daemonize::new().start()?;
     }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let result = match conf.command {
+                Command::Guest(ref command) => guest::execute(command).await,
+                Command::Host(ref command) => host::execute(command).await,
+            };
+
+            if let Err(e) = result {
+                error!("{e:?}");
+                ::std::process::exit(1);
+            }
+        });
 
     Ok(())
 }

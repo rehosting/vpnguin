@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 bincode = "1"
+daemonize = "0"
 lazy_static = "1"
 libc = "0"
 regex = "1"
