@@ -110,7 +110,7 @@ async fn execute_server(
 async fn process_client(
     command: Host,
     internal_address: SocketAddr,
-    stream: TcpStream,
+    mut stream: TcpStream,
     peer_address: SocketAddr,
 ) -> Result<()> {
     info!(
@@ -144,19 +144,10 @@ async fn process_client(
 
     // Forward data
     debug!(peer = peer_address.to_string(), "forwarding data to guest");
-    let (stream_rx, stream_tx) = stream.into_split();
-    let (vsock_rx, vsock_tx) = vsock.split();
-    tokio::spawn(async move {
-        if let Err(e) = forward_to_guest(stream_rx, vsock_tx).await {
-            error!("unable to forward to guest: {e}");
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = forward_to_client(vsock_rx, stream_tx).await {
-            error!("unable to forward to client: {e}");
-        }
-    });
-
+    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
+        .await
+        .context("unable to forward data to guest")?;
+    debug!(peer = peer_address.to_string(), "terminated forwarding to guest");
     Ok(())
 }
 
@@ -164,7 +155,9 @@ async fn process_client(
 async fn forward_to_guest(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) -> Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
+        debug!("reading from client");
         let n = stream_rx.read(&mut buffer).await?;
+        debug!("read {n} bytes");
         if n == 0 {
             // EOF
             break;

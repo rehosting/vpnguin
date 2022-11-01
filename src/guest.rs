@@ -39,7 +39,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
     let e: Option<HostRequest> = read_event(&mut vsock)
         .await
         .context("unable to read init event")?;
-    let stream = match e {
+    let mut stream = match e {
         Some(HostRequest::OpenConnection { address }) => {
             let stream = TcpStream::connect(address)
                 .await
@@ -57,19 +57,9 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
     };
 
     // Forward data
-    let (stream_rx, stream_tx) = stream.into_split();
-    let (vsock_rx, vsock_tx) = vsock.split();
-    tokio::spawn(async move {
-        if let Err(e) = forward_to_host(stream_rx, vsock_tx).await {
-            error!("unable to forward to host: {e}");
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = forward_to_server(vsock_rx, stream_tx).await {
-            error!("unable to forward to server: {e}");
-        }
-    });
-
+    debug!(peer = peer_address.to_string(), "forwarding data to host");
+    tokio::io::copy_bidirectional(&mut vsock, &mut stream).await.context("unable to forward data to host")?;
+    debug!(peer = peer_address.to_string(), "terminated forwarding to host");
     Ok(())
 }
 
