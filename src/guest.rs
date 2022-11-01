@@ -14,6 +14,7 @@ use tokio_vsock::{ReadHalf, SockAddr, VsockListener, VsockStream, WriteHalf};
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
     // Set up a vsock listener
+    info!(context = command.context_id, port = command.command_port, "listening for events");
     let mut listener = VsockListener::bind(command.context_id, command.command_port)
         .context("unable to bind vsock listener")?;
 
@@ -88,6 +89,7 @@ async fn forward_to_host(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) 
         }
     }
 
+    debug!("terminating host forwarding");
     Ok(())
 }
 
@@ -109,5 +111,6 @@ async fn forward_to_server(mut vsock_rx: ReadHalf, mut stream_tx: OwnedWriteHalf
         }
     }
 
+    debug!("terminating server forwarding");
     Ok(())
 }

@@ -16,14 +16,19 @@ use tokio_vsock::{ReadHalf, VsockStream, WriteHalf};
 /// Execute the host endpoint.
 pub async fn execute(command: &Host) -> Result<()> {
     // Set up the event source
-    let bind_re =
-        Regex::new(r"^bind (\d+\.\d+\.\d+\.\d+:\d+)").context("unable to compile bind regex")?;
+    info!(
+        "initializing event source at {}",
+        command.event_path.display()
+    );
+    let bind_re = Regex::new(r"^bind (\d+\.\d+\.\d+\.\d+:\d+)( (\d+\.\d+\.\d+\.\d+:\d+))?")
+        .context("unable to compile bind regex")?;
     let input = tokio::fs::File::open(&command.event_path)
         .await
         .context("unable to open event source")?;
     let mut input = tokio::io::BufReader::new(input);
 
     // Process events
+    info!("processing events");
     loop {
         let mut line = String::new();
         input
@@ -31,17 +36,33 @@ pub async fn execute(command: &Host) -> Result<()> {
             .await
             .context("unable to read new line")?;
         if let Some(cs) = bind_re.captures(&line) {
-            let internal_address: SocketAddr = match cs[0].parse() {
+            let internal_address: SocketAddr = match cs[1].parse() {
                 Ok(x) => x,
                 Err(e) => {
-                    error!("unable to parse bind address: {e}");
+                    error!("unable to parse internal address {}: {e}", &cs[1]);
                     continue;
                 }
             };
 
             // Create a server and vsock bridge
-            let mut external_address = internal_address.clone();
-            external_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let external_address = if cs.len() > 3 {
+                match cs[3].parse() {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("unable to parse external address {}: {e}", &cs[3]);
+                        continue;
+                    }
+                }
+            } else {
+                let mut x = internal_address.clone();
+                x.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                x
+            };
+            info!(
+                internal = internal_address.to_string(),
+                external = external_address.to_string(),
+                "creating server"
+            );
             let listener = match TcpListener::bind(&external_address).await {
                 Ok(x) => x,
                 Err(e) => {
@@ -92,11 +113,16 @@ async fn process_client(
     stream: TcpStream,
     peer_address: SocketAddr,
 ) -> Result<()> {
-    info!(peer = peer_address.to_string(), "processing client");
+    info!(
+        peer = peer_address.to_string(),
+        internal = internal_address.to_string(),
+        "processing client"
+    );
 
     // Create vsock bridge
     debug!(
         peer = peer_address.to_string(),
+        internal = internal_address.to_string(),
         context = command.context_id,
         port = command.command_port,
         "creating vsock bridge"
@@ -108,7 +134,7 @@ async fn process_client(
     // Open a connection on the guest side
     debug!(
         peer = peer_address.to_string(),
-        address = internal_address.to_string(),
+        internal = internal_address.to_string(),
         "issuing open connection request"
     );
     let open_conn = HostRequest::OpenConnection {
@@ -154,6 +180,7 @@ async fn forward_to_guest(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf)
         }
     }
 
+    debug!("terminating guest forwarding");
     Ok(())
 }
 
@@ -171,5 +198,6 @@ async fn forward_to_client(mut vsock_rx: ReadHalf, mut stream_tx: OwnedWriteHalf
         }
     }
 
+    debug!("terminating client forwarding");
     Ok(())
 }

@@ -32,10 +32,10 @@ enum Command {
 #[derive(Clone, StructOpt)]
 pub struct Guest {
     /// Context ID.
-    #[structopt(default_value = "3")]
+    #[structopt(short, long, default_value = "3")]
     context_id: u32,
     /// Command port.
-    #[structopt(default_value = "1234")]
+    #[structopt(short = "p", long, default_value = "1234")]
     command_port: u32,
 }
 
@@ -43,13 +43,13 @@ pub struct Guest {
 #[derive(Clone, StructOpt)]
 pub struct Host {
     /// Guest context ID.
-    #[structopt(default_value = "3")]
+    #[structopt(short, long, default_value = "3")]
     context_id: u32,
     /// Command socket.
-    #[structopt(default_value = "1234")]
+    #[structopt(short = "p", long, default_value = "1234")]
     command_port: u32,
     /// Event source path.
-    #[structopt(default_value = "/tmp/guest_network_events")]
+    #[structopt(short, long, default_value = "/tmp/guest_network_events")]
     event_path: PathBuf,
 }
 
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     };
 
     if let Err(e) = result {
-        error!("{e}");
+        error!("{e:?}");
         ::std::process::exit(1);
     }
 
