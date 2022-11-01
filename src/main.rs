@@ -5,13 +5,19 @@ extern crate tracing;
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::{net::SocketAddr, time::Duration};
 use structopt::StructOpt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::timeout,
+};
 
 mod guest;
 mod host;
+
+/// vsock read timeout.
+const VSOCK_READ_TIMEOUT_SECS: u64 = 60;
 
 /// vsock VPN.
 #[derive(StructOpt)]
@@ -97,18 +103,25 @@ async fn main() -> Result<()> {
 }
 
 /// Read an event.
-async fn read_event<R, E>(r: &mut R) -> Result<E>
+async fn read_event<R, E>(r: &mut R) -> Result<Option<E>>
 where
     R: AsyncReadExt + Unpin,
     E: DeserializeOwned,
 {
-    let n = r.read_u16().await.context("unable to read event size")?;
-    let mut buffer = Box::new(vec![0u8; n as _]);
-    r.read_exact(&mut buffer)
-        .await
-        .context("unable to read event")?;
+    let n = match timeout(Duration::from_secs(VSOCK_READ_TIMEOUT_SECS), r.read_u16()).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => return Ok(None),
+    };
+    let mut buffer = vec![0u8; n as _];
+    timeout(
+        Duration::from_secs(VSOCK_READ_TIMEOUT_SECS),
+        r.read_exact(&mut buffer),
+    )
+    .await
+    .context("unable to read event")??;
     let event: E = bincode::deserialize(&buffer).context("unable to deserialize event")?;
-    Ok(event)
+    Ok(Some(event))
 }
 
 /// Write an event.

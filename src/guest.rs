@@ -36,19 +36,23 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
     info!(peer = peer_address.to_string(), "processing client");
 
     // Process the init event
-    let e: HostRequest = read_event(&mut vsock)
+    let e: Option<HostRequest> = read_event(&mut vsock)
         .await
         .context("unable to read init event")?;
     let stream = match e {
-        HostRequest::OpenConnection { address } => {
+        Some(HostRequest::OpenConnection { address }) => {
             let stream = TcpStream::connect(address)
                 .await
                 .context("unable to connect to guest server")?;
             stream
         }
 
-        _ => {
+        Some(_) => {
             return Err(anyhow!("unexpected init event: {e:?}"));
+        }
+
+        None => {
+            return Err(anyhow!("unable to read init event"));
         }
     };
 
@@ -73,13 +77,11 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
 async fn forward_to_host(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) -> Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
-        let n = match stream_rx.read(&mut buffer).await {
-            Ok(n) => n,
-            Err(_e) => {
-                // Assume that the connection closed
-                break;
-            }
-        };
+        let n = stream_rx.read(&mut buffer).await?;
+        if n == 0 {
+            // EOF
+            break;
+        }
         let e = GuestRequest::SendData {
             data: buffer[..n].to_vec(),
         };
@@ -96,18 +98,20 @@ async fn forward_to_host(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) 
 /// Forward data from host to server.
 async fn forward_to_server(mut vsock_rx: ReadHalf, mut stream_tx: OwnedWriteHalf) -> Result<()> {
     loop {
-        let e: HostRequest = read_event(&mut vsock_rx).await?;
+        let e: Option<HostRequest> = read_event(&mut vsock_rx).await?;
         match e {
-            HostRequest::SendData { data } => {
+            Some(HostRequest::SendData { data }) => {
                 if let Err(_e) = tokio::io::AsyncWriteExt::write_all(&mut stream_tx, &data).await {
                     // Assume the server connection closed
                     break;
                 }
             }
 
-            _ => {
+            Some(e) => {
                 return Err(anyhow!("unexpected host event: {e:?}"));
             }
+
+            None => break,
         }
     }
 

@@ -164,13 +164,11 @@ async fn process_client(
 async fn forward_to_guest(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) -> Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
-        let n = match stream_rx.read(&mut buffer).await {
-            Ok(n) => n,
-            Err(_e) => {
-                // Assume that the connection closed
-                break;
-            }
-        };
+        let n = stream_rx.read(&mut buffer).await?;
+        if n == 0 {
+            // EOF
+            break;
+        }
         let e = HostRequest::SendData {
             data: buffer[..n].to_vec(),
         };
@@ -187,14 +185,16 @@ async fn forward_to_guest(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf)
 /// Forward from the guest to the client.
 async fn forward_to_client(mut vsock_rx: ReadHalf, mut stream_tx: OwnedWriteHalf) -> Result<()> {
     loop {
-        let e: GuestRequest = read_event(&mut vsock_rx).await?;
+        let e: Option<GuestRequest> = read_event(&mut vsock_rx).await?;
         match e {
-            GuestRequest::SendData { data } => {
+            Some(GuestRequest::SendData { data }) => {
                 if let Err(_e) = stream_tx.write_all(&data).await {
                     // Assume the client connection closed
                     break;
                 }
             }
+
+            None => break,
         }
     }
 
