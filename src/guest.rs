@@ -1,49 +1,111 @@
 //! Guest implementation.
 
-use crate::{Guest, VSOCK_PORT};
-use anyhow::{Context, Result};
-use std::net::SocketAddr;
-use tokio::sync::mpsc::{channel, Receiver};
-use tokio_vsock::VsockStream;
-
-/// Guest event.
-enum GuestEvent {
-    /// Bind a new server socket.
-    Bind { address: SocketAddr },
-    /// Destroy a server socket.
-    Destroy { address: SocketAddr },
-}
+use crate::{read_event, write_event, Guest, GuestRequest, HostRequest};
+use anyhow::{anyhow, Context, Result};
+use tokio::{
+    io::AsyncReadExt,
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
+};
+use tokio_vsock::{ReadHalf, SockAddr, VsockListener, VsockStream, WriteHalf};
 
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
-    // Create a vsock socket
-    let host_socket = VsockStream::connect(libc::VMADDR_CID_HOST, VSOCK_PORT)
-        .await
-        .context("unable to connect to host VPN server")?;
+    // Set up a vsock listener
+    let mut listener = VsockListener::bind(command.context_id, command.command_port)
+        .context("unable to bind vsock listener")?;
 
-    // Spawn a control socket task
-    let (control_tx, control_rx) = channel(16);
+    loop {
+        let (vsock, peer_address) = listener
+            .accept()
+            .await
+            .context("unable to accept vsock client")?;
+        tokio::spawn(async move {
+            if let Err(e) = process_client(vsock, peer_address).await {
+                error!("unable to process client: {e}");
+            }
+        });
+    }
+}
+
+/// Process a vsock client.
+async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+    info!(peer = peer_address.to_string(), "processing client");
+
+    // Process the init event
+    let e: HostRequest = read_event(&mut vsock)
+        .await
+        .context("unable to read init event")?;
+    let stream = match e {
+        HostRequest::OpenConnection { address } => {
+            let stream = TcpStream::connect(address)
+                .await
+                .context("unable to connect to guest server")?;
+            stream
+        }
+
+        _ => {
+            return Err(anyhow!("unexpected init event: {e:?}"));
+        }
+    };
+
+    // Forward data
+    let (stream_rx, stream_tx) = stream.into_split();
+    let (vsock_rx, vsock_tx) = vsock.split();
     tokio::spawn(async move {
-        if let Err(e) = guest_control(control_rx, host_socket).await {
-            error!("{e}");
+        if let Err(e) = forward_to_host(stream_rx, vsock_tx).await {
+            error!("unable to forward to host: {e}");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = forward_to_server(vsock_rx, stream_tx).await {
+            error!("unable to forward to server: {e}");
         }
     });
 
-    // TODO: Wait for bind events
-    loop {}
+    Ok(())
 }
 
-/// Guest control task.
-async fn guest_control(
-    mut control_rx: Receiver<GuestEvent>,
-    mut host_stream: VsockStream,
-) -> Result<()> {
-    // TODO: Wait for bind events, forward to host
+/// Forward data from server to host.
+async fn forward_to_host(mut stream_rx: OwnedReadHalf, mut vsock_tx: WriteHalf) -> Result<()> {
+    let mut buffer = [0u8; 8192];
     loop {
-        match control_rx.recv().await {
-            Some(GuestEvent::Bind { address }) => unimplemented!(),
-            Some(GuestEvent::Destroy { address }) => unimplemented!(),
-            None => break,
+        let n = match stream_rx.read(&mut buffer).await {
+            Ok(n) => n,
+            Err(_e) => {
+                // Assume that the connection closed
+                break;
+            }
+        };
+        let e = GuestRequest::SendData {
+            data: buffer[..n].to_vec(),
+        };
+        if let Err(_e) = write_event(&mut vsock_tx, &e).await {
+            // Assume that the host terminated
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Forward data from host to server.
+async fn forward_to_server(mut vsock_rx: ReadHalf, mut stream_tx: OwnedWriteHalf) -> Result<()> {
+    loop {
+        let e: HostRequest = read_event(&mut vsock_rx).await?;
+        match e {
+            HostRequest::SendData { data } => {
+                if let Err(_e) = tokio::io::AsyncWriteExt::write_all(&mut stream_tx, &data).await {
+                    // Assume the server connection closed
+                    break;
+                }
+            }
+
+            _ => {
+                return Err(anyhow!("unexpected host event: {e:?}"));
+            }
         }
     }
 
