@@ -1,8 +1,13 @@
 //! Guest implementation.
 
-use crate::{read_event, Guest, HostRequest};
+use std::net::SocketAddr;
+
+use crate::{read_event, Guest, HostRequest, Transport};
 use anyhow::{anyhow, Context, Result};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+};
 use tokio_vsock::{SockAddr, VsockListener, VsockStream};
 
 /// Execute the guest endpoint.
@@ -37,12 +42,25 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
     let e: Option<HostRequest> = read_event(&mut vsock)
         .await
         .context("unable to read init event")?;
-    let mut stream = match e {
-        Some(HostRequest::OpenConnection { address }) => {
+    match e {
+        Some(HostRequest::OpenConnection {
+            address,
+            transport: _transport @ Transport::Tcp,
+        }) => {
             let stream = TcpStream::connect(address)
                 .await
                 .context("unable to connect to guest server")?;
-            stream
+            proxy_tcp(vsock, peer_address, stream).await?;
+        }
+
+        Some(HostRequest::OpenConnection {
+            address,
+            transport: _transport @ Transport::Udp,
+        }) => {
+            let socket = UdpSocket::bind("0.0.0.0:0")
+                .await
+                .context("unable to create guest socket")?;
+            proxy_udp(vsock, peer_address, socket, address).await?;
         }
 
         Some(_) => {
@@ -54,6 +72,15 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
         }
     };
 
+    Ok(())
+}
+
+/// Proxy TCP.
+async fn proxy_tcp(
+    mut vsock: VsockStream,
+    peer_address: SockAddr,
+    mut stream: TcpStream,
+) -> Result<()> {
     // Forward data
     debug!(peer = peer_address.to_string(), "forwarding data to host");
     tokio::io::copy_bidirectional(&mut vsock, &mut stream)
@@ -64,4 +91,42 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
         "terminated forwarding to host"
     );
     Ok(())
+}
+
+/// Proxy UDP.
+async fn proxy_udp(
+    mut vsock: VsockStream,
+    peer_address: SockAddr,
+    socket: UdpSocket,
+    server_address: SocketAddr,
+) -> Result<()> {
+    debug!(peer = peer_address.to_string(), "forwarding udp datagrams");
+    let mut buffer = [0u8; 8192];
+    loop {
+        debug!("reading client datagram");
+        let n = vsock
+            .read(&mut buffer)
+            .await
+            .context("unable to read client datagram")?;
+        debug!(
+            peer = peer_address.to_string(),
+            internal = server_address.to_string(),
+            size = n,
+            "forwarding udp datagram"
+        );
+        socket
+            .send_to(&buffer[..n], &server_address)
+            .await
+            .context("unable to write client datagram")?;
+        debug!("reading server datagram");
+        let n = socket
+            .recv(&mut buffer)
+            .await
+            .context("unable to read server datagram")?;
+        debug!("forwarding server datagram");
+        vsock
+            .write_all(&buffer[..n])
+            .await
+            .context("unable to write server datagram")?;
+    }
 }

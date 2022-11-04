@@ -6,6 +6,7 @@ extern crate tracing;
 use anyhow::{Context, Result};
 use daemonize::Daemonize;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::fmt::Display;
 use std::path::PathBuf;
 use std::{net::SocketAddr, time::Duration};
 use structopt::StructOpt;
@@ -80,12 +81,30 @@ pub enum HostRequest {
     OpenConnection {
         /// Internal address.
         address: SocketAddr,
+        /// Transport.
+        transport: Transport,
     },
     /// Send data from client to server.
     SendData {
         /// Data.
         data: Vec<u8>,
     },
+}
+
+/// Transport.
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Transport::Tcp => write!(f, "tcp"),
+            Transport::Udp => write!(f, "udp"),
+        }
+    }
 }
 
 /// Main.
