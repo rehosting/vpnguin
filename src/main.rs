@@ -65,29 +65,19 @@ pub struct Host {
 }
 
 /// Guest request.
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum GuestRequest {
-    /// Send data from server to client.
-    SendData {
-        /// Data.
-        data: Vec<u8>,
-    },
 }
 
 /// Host request.
 #[derive(Debug, Deserialize, Serialize)]
 pub enum HostRequest {
-    /// Open a connection.
-    OpenConnection {
+    /// Forward data.
+    Forward {
         /// Internal address.
-        address: SocketAddr,
+        internal_address: SocketAddr,
         /// Transport.
         transport: Transport,
-    },
-    /// Send data from client to server.
-    SendData {
-        /// Data.
-        data: Vec<u8>,
     },
 }
 

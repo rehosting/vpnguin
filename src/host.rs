@@ -3,12 +3,20 @@
 use crate::{write_event, Host, HostRequest, Transport};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    collections::{
+        hash_map::Entry::{Occupied, Vacant},
+        HashMap,
+    },
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
+    sync::mpsc::{channel, Receiver, Sender},
 };
-use tokio_vsock::VsockStream;
+use tokio_vsock::{ReadHalf, VsockStream};
 
 /// Execute the host endpoint.
 pub async fn execute(command: &Host) -> Result<()> {
@@ -129,15 +137,17 @@ async fn execute_tcp_proxy(
         let command = command.clone();
         let internal_address = internal_address.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_client(command, internal_address, stream, peer_address).await {
+            if let Err(e) =
+                process_tcp_client(command, internal_address, stream, peer_address).await
+            {
                 error!("unable to process external client: {e}");
             }
         });
     }
 }
 
-/// Process a client.
-async fn process_client(
+/// Process a TCP client.
+async fn process_tcp_client(
     command: Host,
     internal_address: SocketAddr,
     mut stream: TcpStream,
@@ -161,17 +171,17 @@ async fn process_client(
         .await
         .context("unable to connect vsock bridge")?;
 
-    // Open a connection on the guest side
+    // Forward data to the guest
     debug!(
         peer = peer_address.to_string(),
         internal = internal_address.to_string(),
-        "issuing open connection request"
+        "issuing forwarding request"
     );
-    let open_conn = HostRequest::OpenConnection {
-        address: internal_address,
+    let e = HostRequest::Forward {
+        internal_address,
         transport: Transport::Tcp,
     };
-    write_event(&mut vsock, &open_conn).await?;
+    write_event(&mut vsock, &e).await?;
 
     // Forward data
     debug!(
@@ -203,57 +213,116 @@ async fn execute_udp_proxy(
         "executing udp proxy"
     );
 
+    let socket = Arc::new(socket);
+    let mut buffer = [0u8; 8192];
+    let mut clients: HashMap<SocketAddr, Sender<Vec<u8>>> = HashMap::new();
+    loop {
+        // Wait for a datagram
+        let (n, client_address) = socket
+            .recv_from(&mut buffer)
+            .await
+            .context("unable to receive client datagram")?;
+        let q = match clients.entry(client_address) {
+            Occupied(e) => e.get().clone(),
+            Vacant(e) => {
+                let command = command.clone();
+                let socket = socket.clone();
+                let (q_tx, q_rx) = channel(16);
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        forward_udp_client(command, socket, client_address, internal_address, q_rx)
+                            .await
+                    {
+                        error!(
+                            client = client_address.to_string(),
+                            "unable to forward udp client: {e}"
+                        );
+                    }
+                });
+                e.insert(q_tx).clone()
+            }
+        };
+
+        // Forward to the dedicated client task
+        if let Err(e) = q.send(buffer[..n].to_vec()).await {
+            error!("unable to forward client datagram to task: {e}");
+        }
+    }
+}
+
+/// Forward a UDP client.
+async fn forward_udp_client(
+    command: Host,
+    socket: Arc<UdpSocket>,
+    client_address: SocketAddr,
+    internal_address: SocketAddr,
+    mut queue: Receiver<Vec<u8>>,
+) -> Result<()> {
+    let external_address = socket.local_addr()?;
     // Create vsock bridge
-    let mut vsock = VsockStream::connect(command.context_id, command.command_port)
+    let vsock = VsockStream::connect(command.context_id, command.command_port)
         .await
         .context("unable to connect vsock bridge")?;
+    let (vsock_rx, mut vsock_tx) = vsock.split();
 
-    // Open a "connection" on the guest side
+    // Forward data to the guest
     debug!(
         external = external_address.to_string(),
         internal = internal_address.to_string(),
         "issuing open connection request"
     );
-    let open_conn = HostRequest::OpenConnection {
-        address: internal_address,
+    let e = HostRequest::Forward {
+        internal_address,
         transport: Transport::Udp,
     };
-    write_event(&mut vsock, &open_conn).await?;
+    write_event(&mut vsock_tx, &e).await?;
 
-    // Forward data
     debug!(
+        client = client_address.to_string(),
         external = external_address.to_string(),
         internal = internal_address.to_string(),
         "forwarding udp datagrams"
     );
 
+    // Forward data
+    tokio::spawn(async move {
+        if let Err(e) = forward_udp_to_client(socket, vsock_rx, client_address).await {
+            error!("unable to forward udp to client: {e}");
+        }
+    });
+    while let Some(data) = queue.recv().await {
+        vsock_tx
+            .write_u16(data.len() as _)
+            .await
+            .context("unable to write datagram size")?;
+        vsock_tx
+            .write_all(&data)
+            .await
+            .context("unable to write datagram")?;
+    }
+
+    Ok(())
+}
+
+/// Forward UDP to client.
+async fn forward_udp_to_client(
+    socket: Arc<UdpSocket>,
+    mut vsock_rx: ReadHalf,
+    client_address: SocketAddr,
+) -> Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
-        debug!("reading client datagram");
-        let (n, peer_address) = socket
-            .recv_from(&mut buffer)
+        let n = vsock_rx
+            .read_u16()
             .await
-            .context("unable to read client datagram")?;
-        debug!(
-            peer = peer_address.to_string(),
-            external = external_address.to_string(),
-            internal = internal_address.to_string(),
-            size = n,
-            "forwarding udp datagram"
-        );
-        vsock
-            .write_all(&buffer[..n])
+            .context("unable to read datagram size")? as _;
+        vsock_rx
+            .read_exact(&mut buffer[..n])
             .await
-            .context("unable to forward client datagram")?;
-        debug!("reading server datagram");
-        let n = vsock
-            .read(&mut buffer)
-            .await
-            .context("unable to read server datagram")?;
-        debug!("forwarding server datagram");
+            .context("unable to read datagram")?;
         socket
-            .send_to(&buffer[..n], &peer_address)
+            .send_to(&buffer, &client_address)
             .await
-            .context("unable to forward server datagram")?;
+            .context("unable to send datagram")?;
     }
 }

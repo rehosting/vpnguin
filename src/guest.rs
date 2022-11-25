@@ -43,28 +43,21 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
         .await
         .context("unable to read init event")?;
     match e {
-        Some(HostRequest::OpenConnection {
-            address,
+        Some(HostRequest::Forward {
+            internal_address,
             transport: _transport @ Transport::Tcp,
         }) => {
-            let stream = TcpStream::connect(address)
+            let stream = TcpStream::connect(internal_address)
                 .await
                 .context("unable to connect to guest server")?;
             proxy_tcp(vsock, peer_address, stream).await?;
         }
 
-        Some(HostRequest::OpenConnection {
-            address,
+        Some(HostRequest::Forward {
+            internal_address,
             transport: _transport @ Transport::Udp,
         }) => {
-            let socket = UdpSocket::bind("0.0.0.0:0")
-                .await
-                .context("unable to create guest socket")?;
-            proxy_udp(vsock, peer_address, socket, address).await?;
-        }
-
-        Some(_) => {
-            return Err(anyhow!("unexpected init event: {e:?}"));
+            proxy_udp(vsock, peer_address, internal_address).await?;
         }
 
         None => {
@@ -97,25 +90,37 @@ async fn proxy_tcp(
 async fn proxy_udp(
     mut vsock: VsockStream,
     peer_address: SockAddr,
-    socket: UdpSocket,
-    server_address: SocketAddr,
+    internal_address: SocketAddr,
 ) -> Result<()> {
-    debug!(peer = peer_address.to_string(), "forwarding udp datagrams");
+    debug!(
+        peer = peer_address.to_string(),
+        internal = internal_address.to_string(),
+        "forwarding udp datagrams"
+    );
+
     let mut buffer = [0u8; 8192];
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .context("unable to bind udp socket")?;
+
     loop {
         debug!("reading client datagram");
         let n = vsock
-            .read(&mut buffer)
+            .read_u16()
+            .await
+            .context("unable to read client datagram size")? as _;
+        vsock
+            .read_exact(&mut buffer[..n])
             .await
             .context("unable to read client datagram")?;
         debug!(
             peer = peer_address.to_string(),
-            internal = server_address.to_string(),
+            internal = internal_address.to_string(),
             size = n,
             "forwarding udp datagram"
         );
         socket
-            .send_to(&buffer[..n], &server_address)
+            .send_to(&buffer[..n], &internal_address)
             .await
             .context("unable to write client datagram")?;
         debug!("reading server datagram");
@@ -124,6 +129,11 @@ async fn proxy_udp(
             .await
             .context("unable to read server datagram")?;
         debug!("forwarding server datagram");
+        // TODO: Buffer this and similar to reduce syscalls if perf becomes an issue
+        vsock
+            .write_u16(n as _)
+            .await
+            .context("unable to write server datagram size")?;
         vsock
             .write_all(&buffer[..n])
             .await
