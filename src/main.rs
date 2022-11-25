@@ -62,6 +62,9 @@ pub struct Host {
     /// Event source path.
     #[structopt(short, long, default_value = "/tmp/guest_network_events")]
     event_path: PathBuf,
+    /// Vhost-user-vsock socket
+    #[structopt(short = "u", long)]
+    vhost_user: Option<PathBuf>,
 }
 
 /// Guest request.
@@ -152,7 +155,8 @@ where
     E: Serialize,
 {
     let buffer = bincode::serialize(e).context("unable to serialize event")?;
-    w.write_u16(buffer.len() as _)
+    //w.write_u16(buffer.len() as _)
+    w.write(&(buffer.len() as u16).to_le_bytes())
         .await
         .context("unable to write event size")?;
     w.write_all(&buffer)

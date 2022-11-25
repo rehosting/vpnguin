@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket, UnixStream},
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_vsock::{ReadHalf, VsockStream};
@@ -167,9 +167,40 @@ async fn process_tcp_client(
         port = command.command_port,
         "creating vsock bridge"
     );
-    let mut vsock = VsockStream::connect(command.context_id, command.command_port)
+
+    // VSOCK
+    //let mut vsock = VsockStream::connect(command.context_id, command.command_port)
+    //    .await
+    //    .context("unable to connect vsock bridge")?;
+
+    // UNIX SOCKET for vhost-user-vsock
+    // Only if Some(command.vsock)
+    let vhost_socket = match command.vhost_user {
+        Some(path) => path,
+        _ => panic!("Error: raw vsock support currently broken"),
+    };
+    let mut vsock = UnixStream::connect(vhost_socket)
         .await
-        .context("unable to connect vsock bridge")?;
+        .context("unable to connect to UnixSocket (vhost-user-vsock) bridge")?;
+
+    let connect = format!("CONNECT {}\n", command.command_port);
+    let mut msg = vec![0u8; command.command_port.to_string().len() + 4];
+
+    vsock.write(connect.as_bytes()).await?;
+    vsock.read(&mut msg).await?;
+
+    let ok_expected = format!("OK {}\n", command.command_port);
+    let s = match std::str::from_utf8(&msg) {
+        Ok(v) => v,
+        Err(e) => panic!("Invalid UTF-8 sequence from qemu vsock: {}", e),
+    };
+
+    if s != ok_expected {
+        panic!(
+            "Unexpected response to connect: got {:?} vs expected {:?}",
+            s, ok_expected
+        );
+    }
 
     // Forward data to the guest
     debug!(
@@ -197,6 +228,7 @@ async fn process_tcp_client(
         internal = internal_address.to_string(),
         "terminated forwarding to guest"
     );
+
     Ok(())
 }
 
