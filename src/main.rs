@@ -156,8 +156,7 @@ where
     E: Serialize,
 {
     let buffer = bincode::serialize(e).context("unable to serialize event")?;
-    //w.write_u16(buffer.len() as _)
-    w.write(&(buffer.len() as u16).to_le_bytes())
+    w.write_u16(buffer.len() as _)
         .await
         .context("unable to write event size")?;
     w.write_all(&buffer)
