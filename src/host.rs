@@ -1,7 +1,7 @@
 //! Host implementation.
 
 use crate::{write_event, Host, HostRequest, Transport};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use std::{
     collections::{
@@ -168,38 +168,24 @@ async fn process_tcp_client(
         "creating vsock bridge"
     );
 
-    // VSOCK
-    //let mut vsock = VsockStream::connect(command.context_id, command.command_port)
-    //    .await
-    //    .context("unable to connect vsock bridge")?;
-
-    // UNIX SOCKET for vhost-user-vsock
-    // Only if Some(command.vsock)
-    let vhost_socket = match command.vhost_user {
-        Some(path) => path,
-        _ => panic!("Error: raw vsock support currently broken"),
-    };
-    let mut vsock = UnixStream::connect(vhost_socket)
+    let mut vsock = UnixStream::connect(&command.vhost_user_path)
         .await
-        .context("unable to connect to UnixSocket (vhost-user-vsock) bridge")?;
+        .context("unable to connect to vhost-user-vsock")?;
 
+    debug!("sending connect string to vhost-user-vsock");
     let connect = format!("CONNECT {}\n", command.command_port);
-    let mut msg = vec![0u8; command.command_port.to_string().len() + 4];
-
-    vsock.write(connect.as_bytes()).await?;
-    vsock.read(&mut msg).await?;
-
-    let ok_expected = format!("OK {}\n", command.command_port);
-    let s = match std::str::from_utf8(&msg) {
-        Ok(v) => v,
-        Err(e) => panic!("Invalid UTF-8 sequence from qemu vsock: {}", e),
-    };
-
-    if s != ok_expected {
-        panic!(
-            "Unexpected response to connect: got {:?} vs expected {:?}",
-            s, ok_expected
-        );
+    let ok = format!("OK {}\n", command.command_port);
+    let mut msg = vec![0u8; ok.len()];
+    vsock
+        .write_all(connect.as_bytes())
+        .await
+        .context("unable to write connect string")?;
+    vsock
+        .read_exact(&mut msg)
+        .await
+        .context("unable to receive connect acknowledgment")?;
+    if msg != ok.as_bytes() {
+        return Err(anyhow!("invalid connect acknowledgment received"));
     }
 
     // Forward data to the guest
