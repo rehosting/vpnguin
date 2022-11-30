@@ -28,7 +28,7 @@ pub async fn execute(command: &Guest) -> Result<()> {
             .context("unable to accept vsock client")?;
         tokio::spawn(async move {
             if let Err(e) = process_client(vsock, peer_address).await {
-                error!("unable to process client: {e}");
+                error!("unable to process client: {e:#?}");
             }
         });
     }
@@ -61,7 +61,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
         }
 
         None => {
-            return Err(anyhow!("unable to read init event"));
+            return Err(anyhow!("unable to read init event (no event received)"));
         }
     };
 
