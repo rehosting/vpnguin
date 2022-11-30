@@ -143,7 +143,8 @@ where
         r.read_exact(&mut buffer),
     )
     .await
-    .context("unable to read event")??;
+    .context("unable to read event (timeout)")?
+    .context("unable to read event (I/O error)")?;
     let event: E = bincode::deserialize(&buffer).context("unable to deserialize event")?;
     Ok(Some(event))
 }
