@@ -13,17 +13,38 @@ use std::{
     path::PathBuf,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream, UdpSocket, UnixStream},
     sync::mpsc::{channel, Receiver, Sender},
 };
-use tokio_vsock::{ReadHalf, VsockStream};
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncRead;
+use tokio_vsock::VsockStream;
 
+trait IntoSplit {
+    fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>);
+}
 
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Send  { }
-impl<T: AsyncRead + AsyncWrite + Send> AsyncReadWrite for T {}
+impl IntoSplit for UnixStream {
+    fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) {
+        let (a, b) = self.into_split();
+        (
+         Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
+         Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>
+        )
+    }
+}
+
+impl IntoSplit for VsockStream {
+    fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) {
+        let (a, b) = self.split();
+        (
+         Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
+         Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>
+        )
+    }
+}
+
+trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + IntoSplit { }
+impl<T: AsyncRead + AsyncWrite + Send + IntoSplit> AsyncReadWrite for T {}
 
 
 /// Execute the host endpoint.
@@ -127,6 +148,33 @@ pub async fn execute(command: &Host) -> Result<()> {
     }
 }
 
+/// Execute a TCP proxy.
+async fn execute_tcp_proxy(
+    command: Host,
+    internal_address: SocketAddr,
+    listener: TcpListener,
+) -> Result<()> {
+    loop {
+        let (stream, peer_address) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                error!("unable to accept external client: {e}");
+                continue;
+            }
+        };
+
+        let command = command.clone();
+        let internal_address = internal_address.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                process_tcp_client(command, internal_address, stream, peer_address).await
+            {
+                error!("unable to process external client: {e}");
+            }
+        });
+    }
+}
+
 async fn connect_to_socket(
     vhost_user_path: Option<PathBuf>,
     command_port: u32,
@@ -164,35 +212,6 @@ async fn connect_to_socket(
     }
 }
 
-
-
-/// Execute a TCP proxy.
-async fn execute_tcp_proxy(
-    command: Host,
-    internal_address: SocketAddr,
-    listener: TcpListener,
-) -> Result<()> {
-    loop {
-        let (stream, peer_address) = match listener.accept().await {
-            Ok(x) => x,
-            Err(e) => {
-                error!("unable to accept external client: {e}");
-                continue;
-            }
-        };
-
-        let command = command.clone();
-        let internal_address = internal_address.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                process_tcp_client(command, internal_address, stream, peer_address).await
-            {
-                error!("unable to process external client: {e}");
-            }
-        });
-    }
-}
-
 /// Process a TCP client.
 async fn process_tcp_client(
     command: Host,
@@ -217,8 +236,6 @@ async fn process_tcp_client(
 
     let mut vsock = connect_to_socket(command.vhost_user_path, command.command_port,
                                       command.context_id).await?;
-
-
 
     // Forward data to the guest
     debug!(
@@ -309,11 +326,11 @@ async fn forward_udp_client(
     mut queue: Receiver<Vec<u8>>,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
-    // Create vsock bridge
-    let vsock = VsockStream::connect(command.context_id, command.command_port)
-        .await
-        .context("unable to connect vsock bridge")?;
-    let (vsock_rx, mut vsock_tx) = vsock.split();
+
+    // Create vsock bridge and split it
+    let vsock = connect_to_socket(command.vhost_user_path, command.command_port,
+                                      command.context_id).await?;
+    let (vsock_rx, mut vsock_tx) = vsock.socksplit();
 
     // Forward data to the guest
     debug!(
@@ -350,14 +367,13 @@ async fn forward_udp_client(
             .await
             .context("unable to write datagram")?;
     }
-
     Ok(())
 }
 
 /// Forward UDP to client.
 async fn forward_udp_to_client(
     socket: Arc<UdpSocket>,
-    mut vsock_rx: ReadHalf,
+    mut vsock_rx: Box<dyn AsyncRead + Unpin + Send>,
     client_address: SocketAddr,
 ) -> Result<()> {
     let mut buffer = [0u8; 8192];
