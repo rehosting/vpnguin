@@ -10,6 +10,7 @@ use std::{
     },
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
+    path::PathBuf,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
@@ -17,6 +18,13 @@ use tokio::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_vsock::{ReadHalf, VsockStream};
+use tokio::io::AsyncWrite;
+use tokio::io::AsyncRead;
+
+
+trait AsyncReadWrite: AsyncRead + AsyncWrite + Send  { }
+impl<T: AsyncRead + AsyncWrite + Send> AsyncReadWrite for T {}
+
 
 /// Execute the host endpoint.
 pub async fn execute(command: &Host) -> Result<()> {
@@ -119,6 +127,45 @@ pub async fn execute(command: &Host) -> Result<()> {
     }
 }
 
+async fn connect_to_socket(
+    vhost_user_path: Option<PathBuf>,
+    command_port: u32,
+    context_id: u32,
+) -> Result<Box<dyn AsyncReadWrite + Unpin>> {
+    match vhost_user_path {
+        Some(path) =>  {
+            let mut vsock = UnixStream::connect(path)
+                .await
+                .context("unable to connect to vhost-user-vsock")?;
+
+            debug!("sending connect string to vhost-user-vsock");
+            let connect = format!("CONNECT {}\n", command_port);
+            let ok = format!("OK {}\n", command_port);
+            let mut msg = vec![0u8; ok.len()];
+            vsock
+                .write_all(connect.as_bytes())
+                .await
+                .context("unable to write connect string")?;
+            vsock
+                .read_exact(&mut msg)
+                .await
+                .context("unable to receive connect acknowledgment")?;
+            if msg != ok.as_bytes() {
+                return Err(anyhow!("invalid connect acknowledgment received"));
+            };
+            Ok(Box::new(vsock) as Box<dyn AsyncReadWrite + Unpin>)
+        },
+        _ => {
+            let vsock = VsockStream::connect(context_id, command_port)
+                            .await
+                            .context("unable to connect vsock bridge")?;
+            Ok(Box::new(vsock) as Box<dyn AsyncReadWrite + Unpin>)
+        }
+    }
+}
+
+
+
 /// Execute a TCP proxy.
 async fn execute_tcp_proxy(
     command: Host,
@@ -168,25 +215,10 @@ async fn process_tcp_client(
         "creating vsock bridge"
     );
 
-    let mut vsock = UnixStream::connect(&command.vhost_user_path)
-        .await
-        .context("unable to connect to vhost-user-vsock")?;
+    let mut vsock = connect_to_socket(command.vhost_user_path, command.command_port,
+                                      command.context_id).await?;
 
-    debug!("sending connect string to vhost-user-vsock");
-    let connect = format!("CONNECT {}\n", command.command_port);
-    let ok = format!("OK {}\n", command.command_port);
-    let mut msg = vec![0u8; ok.len()];
-    vsock
-        .write_all(connect.as_bytes())
-        .await
-        .context("unable to write connect string")?;
-    vsock
-        .read_exact(&mut msg)
-        .await
-        .context("unable to receive connect acknowledgment")?;
-    if msg != ok.as_bytes() {
-        return Err(anyhow!("invalid connect acknowledgment received"));
-    }
+
 
     // Forward data to the guest
     debug!(
