@@ -64,7 +64,7 @@ pub struct Host {
     event_path: PathBuf,
     /// Vhost-user-vsock socket
     #[structopt(short = "u", long)]
-    vhost_user_path: PathBuf,
+    vhost_user_path: Option<PathBuf>,
 }
 
 /// Guest request.
