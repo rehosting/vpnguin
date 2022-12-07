@@ -2,13 +2,13 @@
 
 use crate::{write_event, Host, HostRequest, Transport};
 use anyhow::{anyhow, Context, Result};
-use regex::Regex;
+use serde::Deserialize;
 use std::{
     collections::{
         hash_map::Entry::{Occupied, Vacant},
         HashMap,
     },
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     sync::Arc,
     path::PathBuf,
 };
@@ -46,6 +46,12 @@ impl IntoSplit for VsockStream {
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + IntoSplit { }
 impl<T: AsyncRead + AsyncWrite + Send + IntoSplit> AsyncReadWrite for T {}
 
+#[derive(Debug, Deserialize)]
+struct Entry {
+    transport:  Transport,
+    internal_address: SocketAddr,
+    external_address: SocketAddr,
+}
 
 /// Execute the host endpoint.
 pub async fn execute(command: &Host) -> Result<()> {
@@ -54,13 +60,11 @@ pub async fn execute(command: &Host) -> Result<()> {
         "initializing event source at {}",
         command.event_path.display()
     );
-    let bind_re =
-        Regex::new(r"^bind (tcp|udp) (\d+\.\d+\.\d+\.\d+:\d+)( (\d+\.\d+\.\d+\.\d+:\d+))?")
-            .context("unable to compile bind regex")?;
     let input = tokio::fs::File::open(&command.event_path)
         .await
         .context("unable to open event source")?;
     let mut input = tokio::io::BufReader::new(input);
+
 
     // Process events
     info!("processing events");
@@ -70,79 +74,67 @@ pub async fn execute(command: &Host) -> Result<()> {
             .read_line(&mut line)
             .await
             .context("unable to read new line")?;
-        if let Some(cs) = bind_re.captures(&line) {
-            let transport = match &cs[1] {
-                "tcp" => Transport::Tcp,
-                "udp" => Transport::Udp,
-                x => {
-                    error!("unable to parse transport {x}");
-                    continue;
-                }
-            };
-            let internal_address: SocketAddr = match cs[2].parse() {
-                Ok(x) => x,
-                Err(e) => {
-                    error!("unable to parse internal address {}: {e}", &cs[2]);
-                    continue;
-                }
-            };
-            let external_address = if let Some(x) = cs.get(4) {
-                match x.as_str().parse() {
+
+        /*
+            // XXX: Dropped support for unspecified external addr
+            let mut x = internal_address.clone();
+            x.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            x
+        */
+        if line.is_empty() {
+            continue
+        }
+
+        let Ok(record) = csv_line::from_str::<Entry>(&line) else {
+            error!("Unable to parse line {line}");
+            continue;
+        };
+        println!("{:?}", record);
+
+        // Create a proxy and vsock bridge
+        info!(
+            transport = record.transport.to_string(),
+            internal = record.internal_address.to_string(),
+            external = record.external_address.to_string(),
+            "creating proxy"
+        );
+
+        match record.transport {
+            Transport::Tcp => {
+                let listener = match TcpListener::bind(&record.external_address).await {
                     Ok(x) => x,
                     Err(e) => {
-                        error!("unable to parse external address {}: {e}", &cs[4]);
+                        let external_address = record.external_address;
+                        error!("unable to bind external address {external_address}/tcp: {e}");
                         continue;
                     }
-                }
-            } else {
-                let mut x = internal_address.clone();
-                x.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-                x
-            };
+                };
 
-            // Create a proxy and vsock bridge
-            info!(
-                transport = transport.to_string(),
-                internal = internal_address.to_string(),
-                external = external_address.to_string(),
-                "creating proxy"
-            );
+                let command = command.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, listener).await
+                    {
+                        error!("unable to execute tcp proxy: {e}");
+                    }
+                });
+            }
 
-            match transport {
-                Transport::Tcp => {
-                    let listener = match TcpListener::bind(&external_address).await {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!("unable to bind external address {external_address}/tcp: {e}");
-                            continue;
-                        }
-                    };
+            Transport::Udp => {
+                let socket = match UdpSocket::bind(&record.external_address).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        let external_address = record.external_address;
+                        error!("unable to bind external address {external_address}/udp: {e}");
+                        continue;
+                    }
+                };
 
-                    let command = command.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = execute_tcp_proxy(command, internal_address, listener).await
-                        {
-                            error!("unable to execute tcp proxy: {e}");
-                        }
-                    });
-                }
-
-                Transport::Udp => {
-                    let socket = match UdpSocket::bind(&external_address).await {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!("unable to bind external address {external_address}/udp: {e}");
-                            continue;
-                        }
-                    };
-
-                    let command = command.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = execute_udp_proxy(command, internal_address, socket).await {
-                            error!("unable to execute udp proxy: {e}");
-                        }
-                    });
-                }
+                let command = command.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = execute_udp_proxy(command, record.internal_address, socket).await {
+                        error!("unable to execute udp proxy: {e}");
+                    }
+                });
             }
         }
     }
