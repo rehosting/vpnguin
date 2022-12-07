@@ -86,6 +86,7 @@ pub enum HostRequest {
 
 /// Transport.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Transport {
     Tcp,
     Udp,
