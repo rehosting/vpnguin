@@ -2,47 +2,73 @@
 
 use std::net::SocketAddr;
 
-use crate::{read_event, Guest, HostRequest, Transport};
+use crate::{read_event, Guest, HostRequest, Transport, HyperBuf};
 use anyhow::{anyhow, Context, Result};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
+    task::yield_now,
 };
 use tokio_vsock::{SockAddr, VsockListener, VsockStream};
+use std::arch::asm;
+
+const GET_DATA : u32 = 6001;
+
+fn hypercall(num: u32, a1: u32) {
+    unsafe {
+            asm!(
+                "movz $0, {num}, {a1}",
+                num = in(reg) num,
+                a1 = in(reg) a1,
+                )
+    }
+}
+
 
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
+
+
     // Set up a vsock listener
-    info!(
-        context = command.context_id,
-        port = command.command_port,
-        "listening for events"
-    );
-    let mut listener = VsockListener::bind(command.context_id, command.command_port)
-        .context("unable to bind vsock listener")?;
+    //info!(
+    //    context = command.context_id,
+    //    port = command.command_port,
+    //    "listening for events"
+    //);
+    //let mut listener = VsockListener::bind(command.context_id, command.command_port)
+    //    .context("unable to bind vsock listener")?;
+
+    let mut buffer = vec![0_u8; 1024];
 
     loop {
-        let (vsock, peer_address) = listener
-            .accept()
-            .await
-            .context("unable to accept vsock client")?;
-        tokio::spawn(async move {
-            if let Err(e) = process_client(vsock, peer_address).await {
-                error!("unable to process client: {e:#?}");
-            }
-        });
+        // First hypercall: "Get data" with arg of buffer
+        buffer[0] = 0;
+        //let buffer_addr :u32 = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr(), 1024) };
+        let buffer_addr :u32 = buffer.as_ptr() as u32;
+
+        hypercall(GET_DATA, buffer_addr);
+
+        if buffer[0] == 0 {
+            yield_now().await;
+        } else {
+            error!("Have data");
+            //tokio::spawn(async move {
+            //    if let Err(e) = process_buffer(buffer).await {
+            //        error!("unable to process client: {e:#?}");
+            //    }
+            //});
+        }
     }
 }
 
 /// Process a vsock client.
-async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+//async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+/*
+async fn process_client(mut buffer: HyperBuf) -> Result<()> {
     info!(peer = peer_address.to_string(), "processing client");
 
     // Process the init event
-    let e: Option<HostRequest> = read_event(&mut vsock)
-        .await
-        .context("unable to read init event")?;
-    match e {
+    match buffer.request {
         Some(HostRequest::Forward {
             internal_address,
             transport: _transport @ Transport::Tcp,
@@ -50,14 +76,15 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
             let stream = TcpStream::connect(internal_address)
                 .await
                 .context("unable to connect to guest server")?;
-            proxy_tcp(vsock, peer_address, stream).await?;
+            forward_tcp(peer_address, buffer.data, stream).await?;
         }
 
         Some(HostRequest::Forward {
             internal_address,
             transport: _transport @ Transport::Udp,
         }) => {
-            proxy_udp(vsock, peer_address, internal_address).await?;
+            return Err(anyhow!("NYI UDP"));
+            //proxy_udp(vsock, peer_address, internal_address).await?;
         }
 
         None => {
@@ -65,6 +92,25 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
         }
     };
 
+    Ok(())
+}
+*/
+
+/// Proxy TCP.
+async fn forward_tcp(
+    peer_address: SockAddr,
+    data: &[u8],
+    mut stream: TcpStream,
+) -> Result<()> {
+    /*
+    // Forward data
+    debug!(peer = peer_address.to_string(), "forwarding data to host");
+    //stream.send(data);
+    //let (rx, tx) = stream.split();
+    //Independently use tx/rx for sending/receiving
+    //tx.send_to(data);
+    stream.send_to(data);
+    */
     Ok(())
 }
 

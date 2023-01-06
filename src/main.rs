@@ -1,3 +1,4 @@
+#![feature(asm_experimental_arch)]
 //! vsock VPN.
 
 #[macro_use]
@@ -70,6 +71,13 @@ pub struct Host {
 /// Guest request.
 #[derive(Debug, Deserialize, Serialize)]
 pub enum GuestRequest {
+}
+
+//#[derive(Debug, Deserialize, Serialize)]
+pub struct HyperBuf {
+    /// Forward data.
+    request: HostRequest,
+    data: [u8; 1024],
 }
 
 /// Host request.
