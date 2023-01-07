@@ -1,6 +1,7 @@
 //! Guest implementation.
 
 use std::net::SocketAddr;
+use tokio::time::{sleep, Duration};
 
 use crate::{read_event, Guest, HostRequest, Transport, HyperBuf};
 use anyhow::{anyhow, Context, Result};
@@ -42,22 +43,28 @@ pub async fn execute(command: &Guest) -> Result<()> {
 
     loop {
         // First hypercall: "Get data" with arg of buffer
-        buffer[0] = 0;
-        //let buffer_addr :u32 = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr(), 1024) };
-        let buffer_addr :u32 = buffer.as_ptr() as u32;
+        buffer[0] = 0; // Always clear command
+        let buffer_addr : u32 = buffer.as_ptr() as u32;
 
         hypercall(GET_DATA, buffer_addr);
 
         if buffer[0] == 0 {
+            sleep(Duration::from_millis(2000)).await;
+            continue;
+        } else if buffer[0] == 1 {
             yield_now().await;
-        } else {
-            error!("Have data");
-            //tokio::spawn(async move {
-            //    if let Err(e) = process_buffer(buffer).await {
-            //        error!("unable to process client: {e:#?}");
-            //    }
-            //});
+            continue;
+        } else if buffer[1] != 2 {
+            error!("Unexpected control bytes in hypercall message");
         }
+        // If we're here the first byte was 2. Should consume the buffer!
+
+        println!( "GOT BUFFER {:?}", buffer[0]);
+        //tokio::spawn(async move {
+        //    if let Err(e) = process_buffer(buffer).await {
+        //        error!("unable to process client: {e:#?}");
+        //    }
+        //});
     }
 }
 
