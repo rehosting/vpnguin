@@ -15,12 +15,19 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
+use packed_struct::prelude::*;
 
+mod big_array;
+use big_array::BigArray;
 mod guest;
 mod host;
 
 /// vsock read timeout.
 const VSOCK_READ_TIMEOUT_SECS: u64 = 60;
+
+const BYTECOUNT: usize = 1024;
+type DataArr = [u8; BYTECOUNT];
+
 
 /// vsock VPN.
 #[derive(StructOpt)]
@@ -73,11 +80,17 @@ pub struct Host {
 pub enum GuestRequest {
 }
 
-//#[derive(Debug, Deserialize, Serialize)]
+// Size 1064
+#[derive(Debug, Deserialize, Serialize)]
+#[repr(C)]
 pub struct HyperBuf {
-    /// Forward data.
-    request: HostRequest,
-    data: [u8; 1024],
+    command: u32, // 4 bytes, we only care about the first though
+
+    /// Internal address.
+    target: HostRequest, // 36 bytes
+
+    #[serde(with = "BigArray")] // 1024
+    payload: DataArr
 }
 
 /// Host request.
