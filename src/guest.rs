@@ -74,9 +74,9 @@ pub async fn execute(command: &Guest) -> Result<()> {
         let mut cur = Cursor::new(&buffer);
         match bincode::deserialize_from::<_, HyperBuf>(cur) {
             Ok(request) => {
-                println!("Request command: {:?}", request.command);
-                println!("Request target: {:?}", request.target);
-                println!("Request data: {:?}", request.payload);
+                println!("Sending data to target: {:?}", request.target);
+                //println!("Request command: {:?}", request.command);
+                //println!("Request data: {:?}", request.payload);
 
                 tokio::spawn(async move {
                     if let Err(e) = process_buffer(request).await {
@@ -128,12 +128,15 @@ async fn forward_tcp(
 ) -> Result<()> {
 
     // Send data on stream
-    stream.write(data);
+    println!("Connecting to {:?} and sending request: {:?}", stream, data);
+    stream.write(data).await?;
 
     // Just for debugging, let's try printing any response we get. First 100 bytes only
     // Read from the current data in the TcpStream TODO: timeout
     let mut rx_bytes = [0u8; 100];
-    stream.read(&mut rx_bytes);
+    println!("Wait for response");
+    stream.read(&mut rx_bytes).await?;
+    println!("Got response; {:?}", rx_bytes);
     let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
     eprintln!("{}", received);
     Ok(())
