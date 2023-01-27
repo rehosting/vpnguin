@@ -3,21 +3,21 @@
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 
-use crate::{read_event, Guest, HostRequest, Transport, HyperBuf};
-use anyhow::{anyhow, Context, Result};
+use crate::{Guest, HostRequest, Transport, HyperBuf};
+use anyhow::{Context, Result};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
-    task::yield_now,
+    //task::yield_now,
 };
-use tokio_vsock::{SockAddr, VsockListener, VsockStream};
+//use tokio_vsock::{SockAddr, VsockListener, VsockStream};
 use std::arch::asm;
 use std::io::Cursor;
 use std::mem;
 
 // DEBUG
-use crate::HostRequest::Forward;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+//use crate::HostRequest::Forward;
+//use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 
 const GET_DATA : u32 = 6001;
@@ -46,7 +46,7 @@ fn page_in(buf: u32) {
 
 
 /// Execute the guest endpoint.
-pub async fn execute(command: &Guest) -> Result<()> {
+pub async fn execute(_command: &Guest) -> Result<()> {
 
     let mut buffer : Vec<u8> = vec![0_u8; mem::size_of::<HyperBuf>()];
     //let buffer: Vec<u8> = Vec::with_capacity(mem::size_of::<HyperBuf>());
@@ -88,7 +88,7 @@ pub async fn execute(command: &Guest) -> Result<()> {
         } else if buffer[0] != 0xff {
             error!("Unexpected command in hypercall message: {:?}", buffer[0]);
         }
-        let mut cur = Cursor::new(&buffer);
+        let cur = Cursor::new(&buffer);
         match bincode::deserialize_from::<_, HyperBuf>(cur) {
             Ok(request) => {
                 println!("Sending data to target: {:?}", request.target);
@@ -180,7 +180,7 @@ async fn forward_udp(
     println!("Wait for response");
     let mut rx_bytes = [0u8; 100];
     let n = socket.recv(&mut rx_bytes).await.context("unable to read response")?;
-    println!("Got response; {:?}", rx_bytes);
+    println!("Got {:?} byte response; {:?}", n, rx_bytes);
     let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
     eprintln!("{}", received);
     Ok(())
