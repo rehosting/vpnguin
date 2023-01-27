@@ -126,8 +126,7 @@ async fn process_buffer(buffer: HyperBuf) -> Result<()> {
             internal_address,
             transport: _transport @ Transport::Udp,
         } => {
-            return Err(anyhow!("NYI UDP"));
-            //proxy_udp(vsock, peer_address, internal_address).await?;
+            forward_udp(&buffer.payload, internal_address).await?;
         }
 
         //None => {
@@ -159,75 +158,30 @@ async fn forward_tcp(
     Ok(())
 }
 
-/// Proxy TCP.
-async fn proxy_tcp(
-    mut vsock: VsockStream,
-    peer_address: SockAddr,
-    mut stream: TcpStream,
-) -> Result<()> {
-    // Forward data
-    debug!(peer = peer_address.to_string(), "forwarding data to host");
-    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
-        .await
-        .context("unable to forward data to host")?;
-    debug!(
-        peer = peer_address.to_string(),
-        "terminated forwarding to host"
-    );
-    Ok(())
-}
-
 /// Proxy UDP.
-async fn proxy_udp(
-    mut vsock: VsockStream,
-    peer_address: SockAddr,
+async fn forward_udp(
+    data: &[u8],
     internal_address: SocketAddr,
 ) -> Result<()> {
     debug!(
-        peer = peer_address.to_string(),
         internal = internal_address.to_string(),
-        "forwarding udp datagrams"
+        "forwarding udp data to host"
     );
 
-    let mut buffer = [0u8; 8192];
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
         .context("unable to bind udp socket")?;
 
-    loop {
-        debug!("reading client datagram");
-        let n = vsock
-            .read_u16()
-            .await
-            .context("unable to read client datagram size")? as _;
-        vsock
-            .read_exact(&mut buffer[..n])
-            .await
-            .context("unable to read client datagram")?;
-        debug!(
-            peer = peer_address.to_string(),
-            internal = internal_address.to_string(),
-            size = n,
-            "forwarding udp datagram"
-        );
-        socket
-            .send_to(&buffer[..n], &internal_address)
-            .await
-            .context("unable to write client datagram")?;
-        debug!("reading server datagram");
-        let n = socket
-            .recv(&mut buffer)
-            .await
-            .context("unable to read server datagram")?;
-        debug!("forwarding server datagram");
-        // TODO: Buffer this and similar to reduce syscalls if perf becomes an issue
-        vsock
-            .write_u16(n as _)
-            .await
-            .context("unable to write server datagram size")?;
-        vsock
-            .write_all(&buffer[..n])
-            .await
-            .context("unable to write server datagram")?;
-    }
+    socket
+        .send_to(&data, &internal_address)
+        .await
+        .context("unable to write client datagram")?;
+
+    println!("Wait for response");
+    let mut rx_bytes = [0u8; 100];
+    let n = socket.recv(&mut rx_bytes).await.context("unable to read response")?;
+    println!("Got response; {:?}", rx_bytes);
+    let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
+    eprintln!("{}", received);
+    Ok(())
 }
