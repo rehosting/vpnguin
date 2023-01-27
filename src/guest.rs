@@ -32,6 +32,18 @@ fn hypercall(num: u32, a1: u32) {
     }
 }
 
+fn page_in(buf: u32) {
+    let contents : u32 = 0;
+    unsafe {
+            asm!(
+                "lw {contents}, ({buf})", // Deref buf
+                //"movz $0, {num}, {a1}",
+                contents = in(reg) contents,
+                buf = in(reg) buf,
+                )
+    }
+}
+
 
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
@@ -56,6 +68,7 @@ pub async fn execute(command: &Guest) -> Result<()> {
 
     loop {
         // First hypercall: "Get data" with arg of buffer
+        buffer[0] = 2;  // Initialize as "RETRY_PAGE_IN" if hypercall fails we should retry right away with page in
         let buffer_addr : u32 = buffer.as_ptr() as u32;
 
         hypercall(GET_DATA, buffer_addr);
@@ -68,6 +81,10 @@ pub async fn execute(command: &Guest) -> Result<()> {
             println!("RETRY");
             //yield_now().await;
             continue;
+        } else if buffer[0] == 2 {
+            page_in(buffer_addr);
+            continue;
+
         } else if buffer[0] != 0xff {
             error!("Unexpected command in hypercall message: {:?}", buffer[0]);
         }
