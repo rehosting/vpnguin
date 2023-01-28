@@ -21,6 +21,7 @@ use std::mem;
 
 
 const GET_DATA : u32 = 6001;
+const INPUT_FINISHED : u32 = 6002;
 
 fn hypercall(num: u32, a1: u32) {
     unsafe {
@@ -149,12 +150,14 @@ async fn forward_tcp(
 
     // Just for debugging, let's try printing any response we get. First 100 bytes only
     // Read from the current data in the TcpStream TODO: timeout
-    let mut rx_bytes = [0u8; 100];
     println!("Wait for response");
-    stream.read(&mut rx_bytes).await?;
-    println!("Got response; {:?}", rx_bytes);
+    let mut rx_bytes = [0u8; 100];
+    let n = stream.read(&mut rx_bytes).await.context("unable to read response")?;
+    println!("Got {:?} byte response, ready to shutdown: {:?}", n, rx_bytes);
     let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
     eprintln!("{}", received);
+
+    hypercall(INPUT_FINISHED, 0);
     Ok(())
 }
 
@@ -180,8 +183,10 @@ async fn forward_udp(
     println!("Wait for response");
     let mut rx_bytes = [0u8; 100];
     let n = socket.recv(&mut rx_bytes).await.context("unable to read response")?;
-    println!("Got {:?} byte response; {:?}", n, rx_bytes);
+    println!("Got {:?} byte response, ready to shutdown: {:?}", n, rx_bytes);
     let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
     eprintln!("{}", received);
+
+    hypercall(INPUT_FINISHED, 0);
     Ok(())
 }
