@@ -23,6 +23,7 @@ use std::mem;
 const GET_DATA : u32 = 6001;
 const INPUT_FINISHED : u32 = 6002;
 
+#[cfg(target_arch = "mips")]
 fn hypercall(num: u32, a1: u32) {
     unsafe {
             asm!(
@@ -33,6 +34,13 @@ fn hypercall(num: u32, a1: u32) {
     }
 }
 
+// For now x86 is a no-op. TODO: add arm
+#[cfg(not(target_arch = "mips"))]
+fn hypercall(num: u32, a1: u32) {
+}
+
+
+#[cfg(target_arch = "mips")]
 fn page_in(buf: u32) {
     let contents : u32 = 0;
     unsafe {
@@ -43,6 +51,9 @@ fn page_in(buf: u32) {
                 buf = in(reg) buf,
                 )
     }
+}
+#[cfg(not(target_arch = "mips"))]
+fn page_in(buf: u32) {
 }
 
 
