@@ -156,7 +156,8 @@ async fn forward_tcp(
 ) -> Result<()> {
 
     // Send data on stream
-    println!("Connecting to {:?} and sending request: {:?}", stream, data);
+    let send_buf = std::str::from_utf8(&data).expect("valid utf8");
+    println!("Connecting to {:?} and sending request: {:?}", stream, send_buf);
     stream.write(data).await?;
 
     // Just for debugging, let's try printing any response we get. First 100 bytes only
@@ -164,9 +165,8 @@ async fn forward_tcp(
     println!("Wait for response");
     let mut rx_bytes = [0u8; 100];
     let n = stream.read(&mut rx_bytes).await.context("unable to read response")?;
-    println!("Got {:?} byte response, ready to shutdown: {:?}", n, rx_bytes);
     let received = std::str::from_utf8(&rx_bytes).expect("valid utf8");
-    eprintln!("{}", received);
+    println!("Got {:?} byte response, ready to shutdown: {:?}", n, received);
 
     hypercall(INPUT_FINISHED, 0);
     Ok(())
