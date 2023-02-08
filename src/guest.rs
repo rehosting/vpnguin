@@ -98,6 +98,7 @@ pub async fn execute(_command: &Guest) -> Result<()> {
             continue;
 
         } else if buffer[0] != 0xff {
+            hypercall(INPUT_FINISHED, 2); // 2 indicates internal error
             error!("Unexpected command in hypercall message: {:?}", buffer[0]);
         }
         let cur = Cursor::new(&buffer);
@@ -109,11 +110,15 @@ pub async fn execute(_command: &Guest) -> Result<()> {
 
                 tokio::spawn(async move {
                     if let Err(e) = process_buffer(request).await {
+                        hypercall(INPUT_FINISHED, 1); // 1 indicates error connecting
                         error!("unable to process client: {e:#?}");
                     }
                 });
             },
-            Err(e) => println!("Error deserializing data from hypercall {:?}", e),
+            Err(e) => {
+                hypercall(INPUT_FINISHED, 2); // 2 indicates internal error
+                println!("Error deserializing data from hypercall {:?}", e);
+            },
         }
     }
 }
