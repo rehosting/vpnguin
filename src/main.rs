@@ -55,6 +55,9 @@ pub struct Guest {
     /// Command port.
     #[structopt(short = "p", long, default_value = "1234")]
     command_port: u32,
+    /// Use hypercalls instead of vsock
+    #[structopt(short = "H", long)]
+    hypercall: bool,
 }
 
 /// Host endpoint.
@@ -105,7 +108,7 @@ pub enum HostRequest {
 }
 
 /// Transport.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Eq, PartialEq, Hash, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
     Tcp,

@@ -18,6 +18,13 @@ use tokio::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_vsock::VsockStream;
+use std::collections::HashSet;
+use portpicker::{
+    pick_unused_port,
+    is_free_udp,
+    is_free_tcp
+};
+
 
 trait IntoSplit {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>);
@@ -46,7 +53,7 @@ impl IntoSplit for VsockStream {
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + IntoSplit { }
 impl<T: AsyncRead + AsyncWrite + Send + IntoSplit> AsyncReadWrite for T {}
 
-#[derive(Debug, Deserialize)]
+#[derive(Hash, Eq, PartialEq, Debug, Deserialize, Clone)]
 struct Entry {
     transport:  Transport,
     internal_address: SocketAddr,
@@ -64,10 +71,10 @@ pub async fn execute(command: &Host) -> Result<()> {
         .await
         .context("unable to open event source")?;
     let mut input = tokio::io::BufReader::new(input);
-
+    let mut active_bridges = HashSet::new();
 
     // Process events
-    info!("processing events");
+    info!("vpn host now processing events");
     loop {
         let mut line = String::new();
         input
@@ -85,19 +92,40 @@ pub async fn execute(command: &Host) -> Result<()> {
             continue
         }
 
-        let Ok(record) = csv_line::from_str::<Entry>(&line) else {
+        let Ok(mut record) = csv_line::from_str::<Entry>(&line) else {
             error!("Unable to parse line {line}");
             continue;
         };
-        println!("{:?}", record);
+
+        if active_bridges.contains(&record) {
+            // Duplicate - bail
+            info!("Ignoring duplicate entry for {:?} {:?}", record.transport, record.internal_address);
+            continue;
+        }
+
+        //println!("Configuring proxy for {:?}", record);
 
         // Create a proxy and vsock bridge
+        match record.transport {
+            Transport::Tcp => {
+                if !is_free_tcp(record.external_address.port()) {
+                    record.external_address.set_port(pick_unused_port().unwrap());
+                }
+            },
+            Transport::Udp => {
+                if !is_free_udp(record.external_address.port()) {
+                    record.external_address.set_port(pick_unused_port().unwrap());
+                }
+            }
+        }
+
         info!(
             transport = record.transport.to_string(),
             internal = record.internal_address.to_string(),
             external = record.external_address.to_string(),
             "creating proxy"
         );
+
 
         match record.transport {
             Transport::Tcp => {
@@ -111,7 +139,9 @@ pub async fn execute(command: &Host) -> Result<()> {
                 };
 
                 let command = command.clone();
+                active_bridges.insert(record.clone());
                 tokio::spawn(async move {
+
                     if let Err(e) = execute_tcp_proxy(command, record.internal_address, listener).await
                     {
                         error!("unable to execute tcp proxy: {e}");
@@ -130,6 +160,7 @@ pub async fn execute(command: &Host) -> Result<()> {
                 };
 
                 let command = command.clone();
+                active_bridges.insert(record.clone());
                 tokio::spawn(async move {
                     if let Err(e) = execute_udp_proxy(command, record.internal_address, socket).await {
                         error!("unable to execute udp proxy: {e}");
@@ -266,11 +297,6 @@ async fn execute_udp_proxy(
     socket: UdpSocket,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
-    info!(
-        external = external_address.to_string(),
-        internal = internal_address.to_string(),
-        "executing udp proxy"
-    );
 
     let socket = Arc::new(socket);
     let mut buffer = [0u8; 8192];

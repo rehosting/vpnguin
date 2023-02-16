@@ -3,19 +3,21 @@
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 
-use crate::{Guest, HostRequest, Transport, HyperBuf};
-use anyhow::{Context, Result};
+use crate::{read_event, Guest, HostRequest, Transport, HyperBuf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
     time::timeout,
     //task::yield_now,
 };
-//use tokio_vsock::{SockAddr, VsockListener, VsockStream};
-use std::arch::asm;
+use tokio_vsock::{SockAddr, VsockListener, VsockStream};
+use anyhow::{anyhow, Context, Result};
 use std::io::Cursor;
 use std::mem;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime};
+
+#[cfg(target_arch = "mips")]
+use std::arch::asm;
 
 // DEBUG
 //use crate::HostRequest::Forward;
@@ -38,7 +40,7 @@ fn hypercall(num: u32, a1: u32) {
 
 // For now x86 is a no-op. TODO: add arm
 #[cfg(not(target_arch = "mips"))]
-fn hypercall(num: u32, a1: u32) {
+fn hypercall(_num: u32, _a1: u32) {
 }
 
 
@@ -55,13 +57,69 @@ fn page_in(buf: u32) {
     }
 }
 #[cfg(not(target_arch = "mips"))]
-fn page_in(buf: u32) {
+fn page_in(_buf: u32) {
 }
 
+// Execute the guest endpoint in vsock mode
+pub async fn execute_vsock(command: &Guest) -> Result<()> {
+    // Set up a vsock listener
+    info!(
+        context = command.context_id,
+        port = command.command_port,
+        "listening for events"
+    );
+    let mut listener = VsockListener::bind(command.context_id, command.command_port)
+        .context("unable to bind vsock listener")?;
 
-/// Execute the guest endpoint.
-pub async fn execute(_command: &Guest) -> Result<()> {
+    loop {
+        let (vsock, peer_address) = listener
+            .accept()
+            .await
+            .context("unable to accept vsock client")?;
+        tokio::spawn(async move {
+            if let Err(e) = process_client(vsock, peer_address).await {
+                error!("unable to process client: {e:#?}");
+            }
+        });
+    }
+}
 
+/// Process a vsock client
+async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+    info!(peer = peer_address.to_string(), "processing client");
+
+    // Process the init event
+    let e: Option<HostRequest> = read_event(&mut vsock)
+        .await
+        .context("unable to read init event")?;
+    match e {
+        Some(HostRequest::Forward {
+            internal_address,
+            transport: _transport @ Transport::Tcp,
+        }) => {
+            let stream = TcpStream::connect(internal_address)
+                .await
+                .context("unable to connect to guest server")?;
+            proxy_tcp(vsock, peer_address, stream).await?;
+        }
+
+        Some(HostRequest::Forward {
+            internal_address,
+            transport: _transport @ Transport::Udp,
+        }) => {
+            proxy_udp(vsock, peer_address, internal_address).await?;
+        }
+
+        None => {
+            return Err(anyhow!("unable to read init event (no event received)"));
+        }
+    };
+
+    Ok(())
+}
+
+// Execute guest in hypercall mode
+pub async fn execute_hypercall() -> Result<()> {
     let mut buffer : Vec<u8> = vec![0_u8; mem::size_of::<HyperBuf>()];
     //let buffer: Vec<u8> = Vec::with_capacity(mem::size_of::<HyperBuf>());
 
@@ -128,9 +186,19 @@ pub async fn execute(_command: &Guest) -> Result<()> {
     }
 }
 
-/// Process a vsock client.
-//async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+/// Execute the guest endpoint - vsock or hypercall
+pub async fn execute(command: &Guest) -> Result<()> {
 
+    if !command.hypercall {
+        execute_vsock(command).await
+    } else  {
+        // Hypercall doesn't take an argument from us, it will
+        // get the input data itself by running a hypercall
+        execute_hypercall().await
+    }
+}
+
+/// Process a vsock client.
 async fn process_buffer(buffer: HyperBuf) -> Result<()> {
     // Process the init event
     match buffer.target {
@@ -159,27 +227,26 @@ async fn process_buffer(buffer: HyperBuf) -> Result<()> {
     Ok(())
 }
 
-/// Proxy TCP.
+/// Proxy TCP (hypercall)
 async fn forward_tcp(
     data: &[u8],
     mut stream: TcpStream,
 ) -> Result<()> {
 
     // Send data on stream
-    let send_buf = String::from_utf8_lossy(&data);
-    println!("[VPN] {:?} Connecting to {:?} and sending request: {:?}", SystemTime::now(), stream, send_buf);
+    //let send_buf = String::from_utf8_lossy(&data);
+    //println!("[VPN] {:?} Connecting to {:?} and sending request: {:?}", SystemTime::now(), stream, send_buf);
     stream.write(data).await?;
 
     // Just for debugging, let's try printing any response we get. First 100 bytes only
     // Read from the current data in the TcpStream
-    println!("[VPN] {:?} Wait for response (tcp)", SystemTime::now());
+    //println!("[VPN] {:?} Wait for response (tcp)", SystemTime::now());
     let mut rx_bytes = [0u8; 100];
     //let n = stream.read(&mut rx_bytes).await.context("unable to read response")?;
     let rx = stream.read(&mut rx_bytes);
 
-    match timeout(Duration::from_millis(999), rx).await { // Wait 0.1s XXX this isn't workign as expected???
+    match timeout(Duration::from_millis(999), rx).await {
         Err(t) => {
-            //error!("timeout");
             println!("[VPN] {:?} Timeout - waited for {t}", SystemTime::now());
             hypercall(INPUT_FINISHED, 3);
         },
@@ -192,7 +259,26 @@ async fn forward_tcp(
     Ok(())
 }
 
-/// Proxy UDP.
+/// Proxy TCP (vsock)
+async fn proxy_tcp(
+    mut vsock: VsockStream,
+    peer_address: SockAddr,
+    mut stream: TcpStream,
+) -> Result<()> {
+    // Forward data
+    debug!(peer = peer_address.to_string(), "forwarding data to host");
+    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
+        .await
+        .context("unable to forward data to host")?;
+    debug!(
+        peer = peer_address.to_string(),
+        "terminated forwarding to host"
+    );
+    Ok(())
+}
+
+
+/// Proxy UDP (hypercall)
 async fn forward_udp(
     data: &[u8],
     internal_address: SocketAddr,
@@ -220,4 +306,59 @@ async fn forward_udp(
 
     hypercall(INPUT_FINISHED, 0);
     Ok(())
+}
+
+/// Proxy UDP (vsock)
+async fn proxy_udp(
+    mut vsock: VsockStream,
+    peer_address: SockAddr,
+    internal_address: SocketAddr,
+) -> Result<()> {
+    debug!(
+        peer = peer_address.to_string(),
+        internal = internal_address.to_string(),
+        "forwarding udp datagrams"
+    );
+
+    let mut buffer = [0u8; 8192];
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .context("unable to bind udp socket")?;
+
+    loop {
+        debug!("reading client datagram");
+        let n = vsock
+            .read_u16()
+            .await
+            .context("unable to read client datagram size")? as _;
+        vsock
+            .read_exact(&mut buffer[..n])
+            .await
+            .context("unable to read client datagram")?;
+        debug!(
+            peer = peer_address.to_string(),
+            internal = internal_address.to_string(),
+            size = n,
+            "forwarding udp datagram"
+        );
+        socket
+            .send_to(&buffer[..n], &internal_address)
+            .await
+            .context("unable to write client datagram")?;
+        debug!("reading server datagram");
+        let n = socket
+            .recv(&mut buffer)
+            .await
+            .context("unable to read server datagram")?;
+        debug!("forwarding server datagram");
+        // TODO: Buffer this and similar to reduce syscalls if perf becomes an issue
+        vsock
+            .write_u16(n as _)
+            .await
+            .context("unable to write server datagram size")?;
+        vsock
+            .write_all(&buffer[..n])
+            .await
+            .context("unable to write server datagram")?;
+    }
 }
