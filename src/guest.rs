@@ -8,7 +8,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
 };
-use tokio_vsock::{SockAddr, VsockListener, VsockStream};
+use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
@@ -35,7 +35,7 @@ pub async fn execute(command: &Guest) -> Result<()> {
 }
 
 /// Process a vsock client.
-async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Result<()> {
+async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Result<()> {
     info!(peer = peer_address.to_string(), "processing client");
 
     // Process the init event
@@ -71,7 +71,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: SockAddr) -> Resul
 /// Proxy TCP.
 async fn proxy_tcp(
     mut vsock: VsockStream,
-    peer_address: SockAddr,
+    peer_address: VsockAddr,
     mut stream: TcpStream,
 ) -> Result<()> {
     // Forward data
@@ -89,7 +89,7 @@ async fn proxy_tcp(
 /// Proxy UDP.
 async fn proxy_udp(
     mut vsock: VsockStream,
-    peer_address: SockAddr,
+    peer_address: VsockAddr,
     internal_address: SocketAddr,
 ) -> Result<()> {
     debug!(
