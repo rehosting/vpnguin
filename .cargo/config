@@ -6,3 +6,6 @@ linker = "/opt/cross/mipsel-linux-musl/bin/mipsel-linux-musl-gcc"
 
 [target.arm-unknown-linux-musleabi]
 linker = "/opt/cross/arm-linux-musleabi/bin/arm-linux-musleabi-gcc"
+
+[target.mips64-unknown-linux-muslabi64]
+linker = "/opt/cross/mips64-linux-musl/bin/mips64-linux-musl-gcc"
