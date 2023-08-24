@@ -1,6 +1,6 @@
 //! Guest implementation.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::{read_event, Guest, HostRequest, Transport};
 use anyhow::{anyhow, Context, Result};
@@ -44,9 +44,16 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
         .context("unable to read init event")?;
     match e {
         Some(HostRequest::Forward {
-            internal_address,
+            mut internal_address,
             transport: _transport @ Transport::Tcp,
         }) => {
+            // Check for wildcard addresses and replace with localhost
+            if internal_address.ip() == IpAddr::V4([0, 0, 0, 0].into()) {
+                internal_address.set_ip(IpAddr::V4([127, 0, 0, 1].into()));
+            } else if internal_address.ip() == IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0].into()) {
+                internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
+            }
+
             let stream = TcpStream::connect(internal_address)
                 .await
                 .context("unable to connect to guest server")?;
@@ -54,9 +61,16 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
         }
 
         Some(HostRequest::Forward {
-            internal_address,
+            mut internal_address,
             transport: _transport @ Transport::Udp,
         }) => {
+            // Check for wildcard addresses and replace with localhost
+            if internal_address.ip() == IpAddr::V4([0, 0, 0, 0].into()) {
+                internal_address.set_ip(IpAddr::V4([127, 0, 0, 1].into()));
+            } else if internal_address.ip() == IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0].into()) {
+                internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
+            }
+
             proxy_udp(vsock, peer_address, internal_address).await?;
         }
 
