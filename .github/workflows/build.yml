@@ -1,4 +1,4 @@
-name: Compile and Publish HyperNVRAM
+name: Compile and Publish vsock_vpn
 
 on:
   push:
