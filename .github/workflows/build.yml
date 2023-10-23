@@ -6,18 +6,13 @@ on:
       - main
 
 jobs:
-  Login:
-    runs-on: panda-arc
-    steps:
-      - name: 'Login to Github Container Registry'
-        uses: docker/login-action@v3
-        with:
-          username: pandare
-          password: ${{ secrets.pandare_dockerhub }}
   build:
     runs-on: panda-arc
     container:
       image: ubuntu-latest
+      credentials:
+        username: pandare
+        password: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
 
