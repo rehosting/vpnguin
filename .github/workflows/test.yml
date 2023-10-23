@@ -3,7 +3,7 @@ name: Check that the code compiles
 on:
   pull_request:
     branches:
-      - main
+      - main_non_exist
 
 jobs:
   build:
