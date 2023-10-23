@@ -16,7 +16,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+      - name: Docker login
+        run: docker login -u pandare -p ${{secrets.pandare_dockerhub}}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Build 
         run: |
           docker run --rm -v $PWD:/app -w /app ghcr.io/panda-re/embedded-toolchains_rust:latest /app/package.sh
