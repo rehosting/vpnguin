@@ -13,6 +13,11 @@ jobs:
     permissions:
       contents: write
 
+    services:  # Define a Docker service
+      docker:
+        image: docker:dind  # Docker in Docker image
+        options: --privileged  # Run in privileged mode to access Docker daemon
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
