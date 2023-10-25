@@ -3,14 +3,11 @@ name: Check that the code compiles
 on:
   pull_request:
     branches:
-      - main_non_exist
+      - main
 
 jobs:
   build:
     runs-on: panda-arc
-    container:
-      image: docker:dind
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
