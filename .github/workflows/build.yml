@@ -1,20 +1,16 @@
 name: Compile and Publish vsock_vpn
 
 on:
-  push:
+  pull_request:
     branches:
       - main
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    runs-on: panda-arc
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Build 
         run: |
           docker run --rm -v $PWD:/app -w /app ghcr.io/panda-re/embedded-toolchains_rust:latest /app/package.sh
@@ -53,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           id: ${{ steps.create_release.outputs.id }}
-      
+      - run: sudo apt-get update -y && apt-get install ssh -y
       - name: Deploy to Server
         uses: easingthemes/ssh-deploy@main
         with:
