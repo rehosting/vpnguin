@@ -8,16 +8,9 @@ on:
 jobs:
   build:
     runs-on: panda-arc
-    container:
-      image: docker:dind
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Set up Docker
-        uses: docker-practice/actions-setup-docker@master
       - name: Build 
         run: |
           docker run --rm -v $PWD:/app -w /app ghcr.io/panda-re/embedded-toolchains_rust:latest /app/package.sh
