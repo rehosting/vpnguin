@@ -49,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           id: ${{ steps.create_release.outputs.id }}
-      - run: sudo apt install ssh -y
+      - run: sudo apt-get update -y && apt-get install ssh -y
       - name: Deploy to Server
         uses: easingthemes/ssh-deploy@main
         with:
