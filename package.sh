@@ -14,9 +14,27 @@ mkdir -p $OUT
 
 echo "vsock_vpn at $(git rev-parse HEAD) built at $(date)" > $OUT/README.txt
 
-for x in target/*/release/vsock_vpn; do 
+for x in target/*/release/vsock_vpn; do
   ARCH=$(basename $(dirname $(dirname $x)))
-  cp $x ${OUT}/vpn.${ARCH}
+  case $ARCH in
+    x86_64-unknown-linux-musl)
+      SUFFIX="x86_64"
+      ;;
+    arm-unknown-linux-musleabi)
+      SUFFIX="armel"
+      ;;
+    mips-unknown-linux-musl)
+      SUFFIX="mipseb"
+      ;;
+    mipsel-unknown-linux-musl)
+      SUFFIX="mipsel"
+      ;;
+    *)
+      echo "Unsupported architecture: $ARCH"
+      exit 1
+      ;;
+  esac
+  cp $x ${OUT}/vpn.${SUFFIX}
 done
 
 tar cvfz vpn.tar.gz ${OUT}/
