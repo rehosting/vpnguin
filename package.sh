@@ -7,7 +7,7 @@ cargo build --target arm-unknown-linux-musleabi  --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mips-unknown-linux-musl --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mipsel-unknown-linux-musl --release
 
-OUT=bundle
+OUT=vpn
 echo "Packaging into ${OUT} and packaging as vpn.tar.gz"
 rm  -rf $OUT
 mkdir -p $OUT
@@ -19,4 +19,4 @@ for x in target/*/release/vsock_vpn; do
   cp $x ${OUT}/vpn.${ARCH}
 done
 
-tar cvfz vpn.tar.gz bundle/
+tar cvfz vpn.tar.gz ${OUT}/
