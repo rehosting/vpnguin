@@ -37,7 +37,7 @@ for x in target/*/release/vsock_vpn; do
       ;;
   esac
   cp $x ${OUT}/vpn.${SUFFIX}
-  if [${SUFFIX} == "mipseb"]; then
+  if [ "$SUFFIX" == "mipseb" ]; then
     cp $x ${OUT}/vpn.mips64eb
   fi
 done
