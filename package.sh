@@ -7,10 +7,6 @@ cargo build --target arm-unknown-linux-musleabi  --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mips-unknown-linux-musl --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mipsel-unknown-linux-musl --release
 
-# Mips64 needs us to setup the musl64 toolchain. I'm not sure why gnuabi64 doesn't work for us
-# https://github.com/panda-re/embedded-toolchains/issues/5
-rustup target add mips64-unknown-linux-muslabi64
-RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mips64-unknown-linux-muslabi64 --release
 
 OUT=vpn
 echo "Packaging into ${OUT} and packaging as vpn.tar.gz"
@@ -35,15 +31,15 @@ for x in target/*/release/vsock_vpn; do
     mipsel-unknown-linux-musl)
       SUFFIX="mipsel"
       ;;
-    mips64-unknown-linux-muslabi64)
-      SUFFIX="mips64eb"
-      ;;
-    *)
+      *)
       echo "Unsupported architecture: $ARCH"
       exit 1
       ;;
   esac
   cp $x ${OUT}/vpn.${SUFFIX}
+  if [${SUFFIX} == "mipseb"]; then
+    cp $x ${OUT}/vpn.mips64eb
+  fi
 done
 
 tar cvfz vpn.tar.gz ${OUT}/
