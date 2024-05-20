@@ -28,7 +28,7 @@ for x in target/*/release/vsock_vpn; do
       SUFFIX="armel"
       ;;
     aarch64-unknown-linux-musl)
-      SUFFIX="arm64"
+      SUFFIX="aarch64"
       ;;
     mips-unknown-linux-musl)
       SUFFIX="mipseb"
