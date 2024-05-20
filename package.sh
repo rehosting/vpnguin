@@ -4,6 +4,7 @@ set -eux
 echo "Building for 5 target arches"
 cargo build --target x86_64-unknown-linux-musl --release
 cargo build --target arm-unknown-linux-musleabi  --release
+cargo build --target aarch64-unknown-linux-musl  --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mips-unknown-linux-musl --release
 RUSTFLAGS='-C target-feature=+crt-static' cargo build --target mipsel-unknown-linux-musl --release
 
@@ -24,6 +25,9 @@ for x in target/*/release/vsock_vpn; do
       ;;
     arm-unknown-linux-musleabi)
       SUFFIX="armel"
+      ;;
+    aarch-unknown-linux-musl)
+      SUFFIX="arm64"
       ;;
     mips-unknown-linux-musl)
       SUFFIX="mipseb"
