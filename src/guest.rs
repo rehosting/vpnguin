@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
+    select,
 };
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
@@ -88,15 +89,53 @@ async fn proxy_tcp(
     peer_address: VsockAddr,
     mut stream: TcpStream,
 ) -> Result<()> {
-    // Forward data
-    debug!(peer = peer_address.to_string(), "forwarding data to host");
-    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
-        .await
-        .context("unable to forward data to host")?;
-    debug!(
-        peer = peer_address.to_string(),
-        "terminated forwarding to host"
-    );
+    let (mut vsock_read, mut vsock_write) = vsock.split();
+    let (mut stream_read, mut stream_write) = stream.split();
+
+    let vsock_to_stream = async {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match vsock_read.read(&mut buffer).await {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    if stream_write.write_all(&buffer[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        stream_write.shutdown().await
+    };
+
+    let stream_to_vsock = async {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match stream_read.read(&mut buffer).await {
+                Ok(0) => {
+                    debug!("TCP stream closed, shutting down vsock");
+                    break; // EOF - TCP stream closed
+                }
+                Ok(n) => {
+                    if vsock_write.write_all(&buffer[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!("Error reading from TCP stream: {:?}", e);
+                    break;
+                }
+            }
+        }
+        vsock_write.shutdown().await
+    };
+
+    select! {
+        _ = vsock_to_stream => {},
+        _ = stream_to_vsock => {},
+    }
+
+    debug!(peer = peer_address.to_string(), "Proxy operation completed");
     Ok(())
 }
 
