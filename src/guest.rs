@@ -11,6 +11,9 @@ use tokio::{
 };
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
+use tokio::time::{timeout, Duration};
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Execute the guest endpoint.
 pub async fn execute(command: &Guest) -> Result<()> {
     // Set up a vsock listener
@@ -55,10 +58,20 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
                 internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
             }
 
-            let stream = TcpStream::connect(internal_address)
-                .await
-                .context("unable to connect to guest server")?;
-            proxy_tcp(vsock, peer_address, stream).await?;
+            match timeout(CONNECTION_TIMEOUT, TcpStream::connect(internal_address)).await {
+                Ok(Ok(stream)) => {
+                    info!("Successfully connected to {}", internal_address);
+                    proxy_tcp(vsock, peer_address, stream).await?;
+                },
+                Ok(Err(e)) => {
+                    warn!("Failed to connect to {}: {}", internal_address, e);
+                    return Err(e).context(format!("Failed to connect to {}", internal_address));
+                },
+                Err(_) => {
+                    warn!("Connection attempt to {} timed out", internal_address);
+                    return Err(anyhow!("Connection attempt timed out"));
+                },
+            }
         }
 
         Some(HostRequest::Forward {
