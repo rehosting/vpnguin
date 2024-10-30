@@ -18,6 +18,7 @@ use tokio::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_vsock::VsockStream;
+use tokio::fs::OpenOptions;
 
 trait IntoSplit {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>);
@@ -146,6 +147,7 @@ async fn execute_tcp_proxy(
     internal_address: SocketAddr,
     listener: TcpListener,
 ) -> Result<()> {
+    //let mut data_stats: HashMap<SocketAddr> = HashMap::new();
     loop {
         let (stream, peer_address) = match listener.accept().await {
             Ok(x) => x,
@@ -247,15 +249,30 @@ async fn process_tcp_client(
         internal = internal_address.to_string(),
         "forwarding data to guest"
     );
-    tokio::io::copy_bidirectional(&mut vsock, &mut stream)
+    let (bytes_from_guest, bytes_to_guest) = tokio::io::copy_bidirectional(&mut vsock, &mut stream)
         .await
         .context("unable to forward data to guest")?;
     debug!(
         peer = peer_address.to_string(),
         internal = internal_address.to_string(),
-        "terminated forwarding to guest"
+        "terminated forwarding to guest",
     );
 
+    //if we have provided outdir, then output stats about this connection
+    if let Some(outdir) = &command.outdir {
+        let outfile_path = outdir.join(format!("vpn_{}",internal_address.to_string().replace(":", "_")));
+        let outfile_exists = PathBuf::from(&outfile_path).exists();
+        let mut outfile = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(outfile_path)
+            .await
+            .context("unable to open output file")?;
+        if !outfile_exists {
+            outfile.write_all("bytes_to_guest,bytes_from_guest\n".as_bytes()).await?;
+        }
+        outfile.write_all(format!("{},{}\n", bytes_to_guest, bytes_from_guest).as_bytes()).await?;
+    }
     Ok(())
 }
 
