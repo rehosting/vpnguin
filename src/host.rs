@@ -243,24 +243,88 @@ async fn process_tcp_client(
     };
     write_event(&mut vsock, &e).await?;
 
-    // Forward data
-    debug!(
-        peer = peer_address.to_string(),
-        internal = internal_address.to_string(),
-        "forwarding data to guest"
-    );
-    let (bytes_from_guest, bytes_to_guest) = tokio::io::copy_bidirectional(&mut vsock, &mut stream)
-        .await
-        .context("unable to forward data to guest")?;
-    debug!(
-        peer = peer_address.to_string(),
-        internal = internal_address.to_string(),
-        "terminated forwarding to guest",
-    );
+    // Initialize counters for byte tracking
+    let mut bytes_to_guest = 0;
+    let mut bytes_from_guest = 0;
 
-    //if we have provided outdir, then output stats about this connection
+
+    // Create file for logging raw data
+    let mut log_file_bidirectional = if let Some(outdir) = &command.outdir {
+        let log_path = outdir.join(format!("vpn_data_{}", internal_address.to_string().replace(":", "_")));
+        Some(
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(log_path)
+                .await
+                .context("unable to open log file")?,
+        )
+    } else {
+        None
+    };
+
+    let mut log_file = if let Some(outdir) = &command.outdir {
+        let log_path = outdir.join(format!("vpn_response_{}", internal_address.to_string().replace(":", "_")));
+        Some(
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(log_path)
+                .await
+                .context("unable to open log file")?,
+        )
+    } else {
+        None
+    };
+
+    // Forward data with logging
+    let mut buf_to_client = vec![0; 4096];
+    let mut buf_to_guest = vec![0; 4096];
+
+    loop {
+        tokio::select! {
+            // Data from vsock to stream (guest to client)
+            bytes_read = vsock.read(&mut buf_to_client) => {
+                let bytes_read = bytes_read.context("failed to read from vsock")?;
+                if bytes_read == 0 { break; }
+
+                // Log data being sent to the client
+                if let Some(log_file_bidirectional) = &mut log_file_bidirectional {
+                    log_file_bidirectional.write_all(b"<<<").await?;
+                    log_file_bidirectional.write_all(&buf_to_client[..bytes_read]).await?;
+                }
+
+                if let Some(log_file) = &mut log_file {
+                    log_file.write_all(&buf_to_client[..bytes_read]).await?;
+                }
+
+                // Forward to client
+                stream.write_all(&buf_to_client[..bytes_read]).await.context("failed to write to stream")?;
+                bytes_from_guest += bytes_read; // Update bytes from guest
+            }
+
+            // Data from stream to vsock (client to guest)
+            bytes_read = stream.read(&mut buf_to_guest) => {
+                let bytes_read = bytes_read.context("failed to read from stream")?;
+                if bytes_read == 0 { break; }
+
+                // Log data being sent to the guest
+                if let Some(log_file_bidirectional) = &mut log_file_bidirectional {
+                    log_file_bidirectional.write_all(b">>>").await?;
+                    log_file_bidirectional.write_all(&buf_to_guest[..bytes_read]).await?;
+                }
+
+
+                // Forward to guest
+                vsock.write_all(&buf_to_guest[..bytes_read]).await.context("failed to write to vsock")?;
+                bytes_to_guest += bytes_read; // Update bytes to guest
+            }
+        }
+    }
+
+    // Connection statistics logging
     if let Some(outdir) = &command.outdir {
-        let outfile_path = outdir.join(format!("vpn_{}",internal_address.to_string().replace(":", "_")));
+        let outfile_path = outdir.join(format!("vpn_{}", internal_address.to_string().replace(":", "_")));
         let outfile_exists = PathBuf::from(&outfile_path).exists();
         let mut outfile = OpenOptions::new()
             .append(true)
