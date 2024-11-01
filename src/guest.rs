@@ -98,7 +98,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
 
 /// Proxy TCP.
 async fn proxy_tcp(
-    mut vsock: VsockStream,
+    vsock: VsockStream,
     peer_address: VsockAddr,
     mut stream: TcpStream,
 ) -> Result<()> {
