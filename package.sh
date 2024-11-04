@@ -44,6 +44,8 @@ for x in target/*/release/vsock_vpn; do
   cp $x ${OUT}/vpn.${SUFFIX}
   if [ "$SUFFIX" == "mipseb" ]; then
     cp $x ${OUT}/vpn.mips64eb
+  elif [ "$SUFFIX" == "mipsel" ]; then
+    cp $x ${OUT}/vpn.mips64el
   fi
 done
 
