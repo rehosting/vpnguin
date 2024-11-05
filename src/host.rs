@@ -325,16 +325,12 @@ async fn process_tcp_client(
     // Connection statistics logging
     if let Some(outdir) = &command.outdir {
         let outfile_path = outdir.join(format!("vpn_{}", internal_address.to_string().replace(":", "_")));
-        let outfile_exists = PathBuf::from(&outfile_path).exists();
         let mut outfile = OpenOptions::new()
             .append(true)
             .create(true)
             .open(outfile_path)
             .await
             .context("unable to open output file")?;
-        if !outfile_exists {
-            outfile.write_all("bytes_to_guest,bytes_from_guest\n".as_bytes()).await?;
-        }
         outfile.write_all(format!("{},{}\n", bytes_to_guest, bytes_from_guest).as_bytes()).await?;
     }
     Ok(())
