@@ -51,5 +51,4 @@ for x in target/*/release/vsock_vpn; do
       cp $x ${OUT}/mips64el/vpn
   fi
 done
-
-tar cvfz vpn.tar.gz ${OUT}/
+tar cvfz vpn.tar.gz -C ${OUT} .
