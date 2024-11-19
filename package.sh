@@ -22,31 +22,33 @@ for x in target/*/release/vsock_vpn; do
   ARCH=$(basename $(dirname $(dirname $x)))
   case $ARCH in
     x86_64-unknown-linux-musl)
-      SUFFIX="x86_64"
+      ARCH_DIR="x86_64"
       ;;
     arm-unknown-linux-musleabi)
-      SUFFIX="armel"
+      ARCH_DIR="armel"
       ;;
     aarch64-unknown-linux-musl)
-      SUFFIX="aarch64"
+      ARCH_DIR="aarch64"
       ;;
     mips-unknown-linux-musl)
-      SUFFIX="mipseb"
+      ARCH_DIR="mipseb"
       ;;
     mipsel-unknown-linux-musl)
-      SUFFIX="mipsel"
+      ARCH_DIR="mipsel"
       ;;
       *)
       echo "Unsupported architecture: $ARCH"
       exit 1
       ;;
   esac
-  cp $x ${OUT}/vpn.${SUFFIX}
-  if [ "$SUFFIX" == "mipseb" ]; then
-    cp $x ${OUT}/vpn.mips64eb
-  elif [ "$SUFFIX" == "mipsel" ]; then
-    cp $x ${OUT}/vpn.mips64el
+  mkdir -p ${OUT}/${ARCH_DIR}
+  cp $x ${OUT}/${ARCH_DIR}/vpn
+  if [ "$ARCH_DIR" == "mipseb" ]; then
+      mkdir -p ${OUT}/mips64eb
+      cp $x ${OUT}/mips64eb/vpn
+    elif [ "$ARCH_DIR" == "mipsel" ]; then
+      mkdir -p ${OUT}/mips64el
+      cp $x ${OUT}/mips64el/vpn
   fi
 done
-
-tar cvfz vpn.tar.gz ${OUT}/
+tar cvfz vpn.tar.gz -C ${OUT} .
