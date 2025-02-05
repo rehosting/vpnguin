@@ -52,6 +52,7 @@ struct Entry {
     transport:  Transport,
     internal_address: SocketAddr,
     external_address: SocketAddr,
+    source_address: SocketAddr,
 }
 
 /// Execute the host endpoint.
@@ -97,6 +98,7 @@ pub async fn execute(command: &Host) -> Result<()> {
             transport = record.transport.to_string(),
             internal = record.internal_address.to_string(),
             external = record.external_address.to_string(),
+            source = record.source_address.to_string(),
             "creating proxy"
         );
 
@@ -113,7 +115,7 @@ pub async fn execute(command: &Host) -> Result<()> {
 
                 let command = command.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, listener).await
+                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, record.source_address, listener).await
                     {
                         error!("unable to execute tcp proxy: {e}");
                     }
@@ -132,7 +134,7 @@ pub async fn execute(command: &Host) -> Result<()> {
 
                 let command = command.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_udp_proxy(command, record.internal_address, socket).await {
+                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, socket).await {
                         error!("unable to execute udp proxy: {e}");
                     }
                 });
@@ -145,6 +147,7 @@ pub async fn execute(command: &Host) -> Result<()> {
 async fn execute_tcp_proxy(
     command: Host,
     internal_address: SocketAddr,
+    source_address: SocketAddr,
     listener: TcpListener,
 ) -> Result<()> {
     //let mut data_stats: HashMap<SocketAddr> = HashMap::new();
@@ -159,9 +162,10 @@ async fn execute_tcp_proxy(
 
         let command = command.clone();
         let internal_address = internal_address.clone();
+        let source_address = source_address.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                process_tcp_client(command, internal_address, stream, peer_address).await
+                process_tcp_client(command, internal_address, stream, peer_address, source_address).await
             {
                 error!("unable to process external client: {e}");
             }
@@ -212,6 +216,7 @@ async fn process_tcp_client(
     internal_address: SocketAddr,
     mut stream: TcpStream,
     peer_address: SocketAddr,
+    source_address: SocketAddr,
 ) -> Result<()> {
     info!(
         peer = peer_address.to_string(),
@@ -223,6 +228,7 @@ async fn process_tcp_client(
     debug!(
         peer = peer_address.to_string(),
         internal = internal_address.to_string(),
+        source = source_address.to_string(),
         context = command.context_id,
         port = command.command_port,
         "creating vsock bridge"
@@ -235,11 +241,13 @@ async fn process_tcp_client(
     debug!(
         peer = peer_address.to_string(),
         internal = internal_address.to_string(),
+        source = source_address.to_string(),
         "issuing forwarding request"
     );
     let e = HostRequest::Forward {
         internal_address,
         transport: Transport::Tcp,
+        source_address
     };
     write_event(&mut vsock, &e).await?;
 
@@ -340,12 +348,14 @@ async fn process_tcp_client(
 async fn execute_udp_proxy(
     command: Host,
     internal_address: SocketAddr,
+    source_address: SocketAddr,
     socket: UdpSocket,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
     info!(
         external = external_address.to_string(),
         internal = internal_address.to_string(),
+        source = source_address.to_string(),
         "executing udp proxy"
     );
 
@@ -366,7 +376,7 @@ async fn execute_udp_proxy(
                 let (q_tx, q_rx) = channel(16);
                 tokio::spawn(async move {
                     if let Err(e) =
-                        forward_udp_client(command, socket, client_address, internal_address, q_rx)
+                        forward_udp_client(command, socket, client_address, internal_address, source_address, q_rx)
                             .await
                     {
                         error!(
@@ -392,6 +402,7 @@ async fn forward_udp_client(
     socket: Arc<UdpSocket>,
     client_address: SocketAddr,
     internal_address: SocketAddr,
+    source_address: SocketAddr,
     mut queue: Receiver<Vec<u8>>,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
@@ -405,11 +416,13 @@ async fn forward_udp_client(
     debug!(
         external = external_address.to_string(),
         internal = internal_address.to_string(),
+        source = source_address.to_string(),
         "issuing open connection request"
     );
     let e = HostRequest::Forward {
         internal_address,
         transport: Transport::Udp,
+        source_address: source_address,
     };
     write_event(&mut vsock_tx, &e).await?;
 
@@ -417,6 +430,7 @@ async fn forward_udp_client(
         client = client_address.to_string(),
         external = external_address.to_string(),
         internal = internal_address.to_string(),
+        source = source_address.to_string(),
         "forwarding udp datagrams"
     );
 
