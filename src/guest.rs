@@ -6,7 +6,7 @@ use crate::{read_event, Guest, HostRequest, Transport};
 use anyhow::{anyhow, Context, Result};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::{TcpSocket, TcpStream, UdpSocket},
     select,
 };
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
@@ -50,6 +50,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
         Some(HostRequest::Forward {
             mut internal_address,
             transport: _transport @ Transport::Tcp,
+            source_address,
         }) => {
             // Check for wildcard addresses and replace with localhost
             if internal_address.ip() == IpAddr::V4([0, 0, 0, 0].into()) {
@@ -57,8 +58,9 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
             } else if internal_address.ip() == IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0].into()) {
                 internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
             }
-
-            match timeout(CONNECTION_TIMEOUT, TcpStream::connect(internal_address)).await {
+            let socket = TcpSocket::new_v4().context("unable to create tcp socket")?;
+            socket.bind(source_address)?;
+            match timeout(CONNECTION_TIMEOUT, socket.connect(internal_address)).await {
                 Ok(Ok(stream)) => {
                     info!("Successfully connected to {}", internal_address);
                     proxy_tcp(vsock, peer_address, stream).await?;
@@ -77,6 +79,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
         Some(HostRequest::Forward {
             mut internal_address,
             transport: _transport @ Transport::Udp,
+            source_address,
         }) => {
             // Check for wildcard addresses and replace with localhost
             if internal_address.ip() == IpAddr::V4([0, 0, 0, 0].into()) {
@@ -85,7 +88,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
                 internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
             }
 
-            proxy_udp(vsock, peer_address, internal_address).await?;
+            proxy_udp(vsock, peer_address, internal_address, source_address).await?;
         }
 
         None => {
@@ -157,6 +160,7 @@ async fn proxy_udp(
     mut vsock: VsockStream,
     peer_address: VsockAddr,
     internal_address: SocketAddr,
+    source_address: SocketAddr,
 ) -> Result<()> {
     debug!(
         peer = peer_address.to_string(),
@@ -165,7 +169,7 @@ async fn proxy_udp(
     );
 
     let mut buffer = [0u8; 8192];
-    let socket = UdpSocket::bind("0.0.0.0:0")
+    let socket = UdpSocket::bind(source_address)
         .await
         .context("unable to bind udp socket")?;
 

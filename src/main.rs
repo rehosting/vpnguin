@@ -84,6 +84,8 @@ pub enum HostRequest {
         internal_address: SocketAddr,
         /// Transport.
         transport: Transport,
+        /// Source address (for spoofing).
+        source_address: SocketAddr,
     },
 }
 
