@@ -58,7 +58,10 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
             } else if internal_address.ip() == IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0].into()) {
                 internal_address.set_ip(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 1].into()));
             }
-            let socket = TcpSocket::new_v4().context("unable to create tcp socket")?;
+            let socket = match internal_address.ip() {
+                IpAddr::V4(_) => TcpSocket::new_v4().context("unable to create IPv4 TCP socket")?,
+                IpAddr::V6(_) => TcpSocket::new_v6().context("unable to create IPv6 TCP socket")?,
+            };
             socket.bind(source_address)?;
             match timeout(CONNECTION_TIMEOUT, socket.connect(internal_address)).await {
                 Ok(Ok(stream)) => {
