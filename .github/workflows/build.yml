@@ -24,8 +24,7 @@ jobs:
       - name: Build 
         run: |
           docker build -t img .
-          docker run --rm -v $PWD:/out -w /out cp /app/vpn.tar.gz /out
-
+          docker run --rm -v $PWD:/out -w /out img cp /app/vpn.tar.gz /out
       - name: Save package
         uses: actions/upload-artifact@v4
         with:
