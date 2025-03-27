@@ -17,7 +17,7 @@ use tokio::{
     net::{TcpListener, TcpStream, UdpSocket, UnixStream},
     sync::mpsc::{channel, Receiver, Sender},
 };
-use tokio_vsock::VsockStream;
+use tokio_vsock::{VsockAddr, VsockStream};
 use tokio::fs::OpenOptions;
 
 trait IntoSplit {
@@ -26,20 +26,20 @@ trait IntoSplit {
 
 impl IntoSplit for UnixStream {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) {
-        let (a, b) = self.into_split();
+        let (a, b) = self.into_split(); 
         (
-         Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
-         Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>
+            Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
+            Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>,
         )
     }
 }
 
 impl IntoSplit for VsockStream {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) {
-        let (a, b) = self.split();
+        let (a, b) = self.into_split();
         (
-         Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
-         Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>
+            Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
+            Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>,
         )
     }
 }
@@ -202,7 +202,7 @@ async fn connect_to_socket(
             Ok(Box::new(vsock) as Box<dyn AsyncReadWrite + Unpin>)
         },
         _ => {
-            let vsock = VsockStream::connect(context_id, command_port)
+            let vsock = VsockStream::connect(VsockAddr::new(context_id, command_port))
                             .await
                             .context("unable to connect vsock bridge")?;
             Ok(Box::new(vsock) as Box<dyn AsyncReadWrite + Unpin>)
