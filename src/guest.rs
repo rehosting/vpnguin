@@ -22,7 +22,7 @@ pub async fn execute(command: &Guest) -> Result<()> {
         port = command.command_port,
         "listening for events"
     );
-    let mut listener = VsockListener::bind(command.context_id, command.command_port)
+    let mut listener = VsockListener::bind(VsockAddr::new(command.context_id, command.command_port))
         .context("unable to bind vsock listener")?;
 
     loop {
@@ -104,7 +104,7 @@ async fn process_client(mut vsock: VsockStream, peer_address: VsockAddr) -> Resu
 
 /// Proxy TCP.
 async fn proxy_tcp(
-    vsock: VsockStream,
+    mut vsock: VsockStream,
     peer_address: VsockAddr,
     mut stream: TcpStream,
 ) -> Result<()> {
