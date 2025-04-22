@@ -16,7 +16,17 @@ use tokio::{
 };
 
 mod guest;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod host;
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod host {
+    use anyhow::{anyhow, Result};
+    use crate::Host;
+    pub async fn execute(command: &Host) -> Result<()> {
+        Err(anyhow!("VPN not implemented on target_arch: {}", std::env::consts::ARCH))
+    }
+}
 
 /// vsock read timeout.
 const VSOCK_READ_TIMEOUT_SECS: u64 = 60;
