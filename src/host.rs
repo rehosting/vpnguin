@@ -1,5 +1,4 @@
 //! Host implementation.
-
 use crate::{write_event, Host, HostRequest, Transport};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -20,13 +19,16 @@ use tokio::{
 use tokio_vsock::{VsockAddr, VsockStream};
 use tokio::fs::OpenOptions;
 
+mod pcap_logger;
+use pcap_logger::PcapLogger;
+
 trait IntoSplit {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>);
 }
 
 impl IntoSplit for UnixStream {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) {
-        let (a, b) = self.into_split(); 
+        let (a, b) = self.into_split();
         (
             Box::new(a) as Box<dyn AsyncRead + Unpin + Send>,
             Box::new(b) as Box<dyn AsyncWrite + Unpin + Send>,
@@ -67,6 +69,8 @@ pub async fn execute(command: &Host) -> Result<()> {
         .context("unable to open event source")?;
     let mut input = tokio::io::BufReader::new(input);
 
+    // pcap_logger logging will be a noop if pcap_path is None
+    let pcap_logger  = PcapLogger::new(&command.pcap_path);
 
     // Process events
     info!("processing events");
@@ -91,7 +95,6 @@ pub async fn execute(command: &Host) -> Result<()> {
             error!("Unable to parse line {line}");
             continue;
         };
-        println!("{:?}", record);
 
         // Create a proxy and vsock bridge
         info!(
@@ -114,8 +117,9 @@ pub async fn execute(command: &Host) -> Result<()> {
                 };
 
                 let command = command.clone();
+                let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, record.source_address, listener).await
+                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, record.source_address, listener, pcap_logger).await
                     {
                         error!("unable to execute tcp proxy: {e}");
                     }
@@ -133,8 +137,9 @@ pub async fn execute(command: &Host) -> Result<()> {
                 };
 
                 let command = command.clone();
+                let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, socket).await {
+                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, socket, pcap_logger).await {
                         error!("unable to execute udp proxy: {e}");
                     }
                 });
@@ -149,6 +154,7 @@ async fn execute_tcp_proxy(
     internal_address: SocketAddr,
     source_address: SocketAddr,
     listener: TcpListener,
+    pcap_logger: PcapLogger,
 ) -> Result<()> {
     //let mut data_stats: HashMap<SocketAddr> = HashMap::new();
     loop {
@@ -161,11 +167,12 @@ async fn execute_tcp_proxy(
         };
 
         let command = command.clone();
+        let pcap_logger = pcap_logger.clone();
         let internal_address = internal_address.clone();
         let source_address = source_address.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                process_tcp_client(command, internal_address, stream, peer_address, source_address).await
+                process_tcp_client(command, internal_address, stream, peer_address, source_address, pcap_logger).await
             {
                 error!("unable to process external client: {e}");
             }
@@ -217,6 +224,7 @@ async fn process_tcp_client(
     mut stream: TcpStream,
     peer_address: SocketAddr,
     source_address: SocketAddr,
+    pcap_logger: PcapLogger,
 ) -> Result<()> {
     info!(
         peer = peer_address.to_string(),
@@ -289,6 +297,10 @@ async fn process_tcp_client(
     let mut buf_to_client = vec![0; 4096];
     let mut buf_to_guest = vec![0; 4096];
 
+    // Create a chimera address for logging in case we are spoofing IP
+    let log_client_addr = SocketAddr::new( source_address.ip(), peer_address.port());
+    pcap_logger.init_tcp_stream(log_client_addr, internal_address).await;
+
     loop {
         tokio::select! {
             // Data from vsock to stream (guest to client)
@@ -306,9 +318,11 @@ async fn process_tcp_client(
                     log_file.write_all(&buf_to_client[..bytes_read]).await?;
                 }
 
+
                 // Forward to client
                 stream.write_all(&buf_to_client[..bytes_read]).await.context("failed to write to stream")?;
                 bytes_from_guest += bytes_read; // Update bytes from guest
+                pcap_logger.log_packet(&buf_to_client[..bytes_read], Transport::Tcp, internal_address, log_client_addr, None).await;
             }
 
             // Data from stream to vsock (client to guest)
@@ -326,9 +340,12 @@ async fn process_tcp_client(
                 // Forward to guest
                 vsock.write_all(&buf_to_guest[..bytes_read]).await.context("failed to write to vsock")?;
                 bytes_to_guest += bytes_read; // Update bytes to guest
+                pcap_logger.log_packet(&buf_to_guest[..bytes_read], Transport::Tcp, log_client_addr, internal_address, None).await;
             }
         }
     }
+
+    pcap_logger.close_tcp_stream(peer_address, internal_address).await;
 
     // Connection statistics logging
     if let Some(outdir) = &command.outdir {
@@ -350,6 +367,7 @@ async fn execute_udp_proxy(
     internal_address: SocketAddr,
     source_address: SocketAddr,
     socket: UdpSocket,
+    pcap_logger: PcapLogger,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
     info!(

@@ -78,6 +78,9 @@ pub struct Host {
     /// Event source path.
     #[structopt(short, long)]
     outdir: Option<PathBuf>,
+    /// Path to pcap file
+    #[structopt(short = "l", long)]
+    pcap_path: Option<PathBuf>,
 }
 
 /// Guest request.
