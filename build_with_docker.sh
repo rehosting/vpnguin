@@ -1,3 +1,4 @@
 #!/bin/bash
 
-docker run --rm -v $PWD:/app -w /app ghcr.io/rehosting/embedded-toolchains_rust:latest /app/package.sh
+docker build -t vpnguin-build .
+docker run --rm -v $PWD:/out -w /out vpnguin-build cp /app/vpn.tar.gz /out
