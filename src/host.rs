@@ -392,9 +392,10 @@ async fn execute_udp_proxy(
                 let command = command.clone();
                 let socket = socket.clone();
                 let (q_tx, q_rx) = channel(16);
+                let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        forward_udp_client(command, socket, client_address, internal_address, source_address, q_rx)
+                        forward_udp_client(command, socket, client_address, internal_address, source_address, q_rx, Arc::new(pcap_logger))
                             .await
                     {
                         error!(
@@ -422,6 +423,7 @@ async fn forward_udp_client(
     internal_address: SocketAddr,
     source_address: SocketAddr,
     mut queue: Receiver<Vec<u8>>,
+    pcap_logger: Arc<PcapLogger>,
 ) -> Result<()> {
     let external_address = socket.local_addr()?;
 
@@ -453,8 +455,9 @@ async fn forward_udp_client(
     );
 
     // Forward data
+    let pcap_logger_to_client = pcap_logger.clone();
     tokio::spawn(async move {
-        if let Err(e) = forward_udp_to_client(socket, vsock_rx, client_address).await {
+        if let Err(e) = forward_udp_to_client(socket, vsock_rx, client_address, pcap_logger_to_client, internal_address, source_address).await {
             error!("unable to forward udp to client: {e}");
         }
     });
@@ -467,6 +470,7 @@ async fn forward_udp_client(
             .write_all(&data)
             .await
             .context("unable to write datagram")?;
+        pcap_logger.log_packet(&data, Transport::Udp, source_address, internal_address, None).await;
     }
     Ok(())
 }
@@ -476,6 +480,9 @@ async fn forward_udp_to_client(
     socket: Arc<UdpSocket>,
     mut vsock_rx: Box<dyn AsyncRead + Unpin + Send>,
     client_address: SocketAddr,
+    pcap_logger: Arc<PcapLogger>,
+    internal_address: SocketAddr,
+    peer_address: SocketAddr
 ) -> Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
@@ -491,5 +498,6 @@ async fn forward_udp_to_client(
             .send_to(&buffer, &client_address)
             .await
             .context("unable to send datagram")?;
+        pcap_logger.log_packet(&buffer[..n], Transport::Udp, internal_address, peer_address, None).await;
     }
 }
