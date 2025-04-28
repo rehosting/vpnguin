@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::mpsc;
 
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-use etherparse::{PacketBuilder, IpNumber};
+use etherparse::PacketBuilder;
 
 // Since TCP is stateful, we need to track this stuff
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -124,57 +124,46 @@ impl PcapLogger {
     pub async fn close_tcp_stream(&self, peer_address: SocketAddr, internal_address: SocketAddr) {
         // WARNING: this code is untested, we don't really tear down connections in vpnguin
         if let Some(tcp_map) = &self.tcp_flows {
-            // Get the TCP states for both directions
-            let internal_to_peer = tcp_map.get(&TcpFlow {
+            // FIN (peer -> internal)
+            self.log_packet(
+                &[],
+                Transport::Tcp,
+                peer_address,
+                internal_address,
+                Some(TcpFlags{syn: false, ack: false, fin: true}),
+            ).await;
+
+            // FIN+ACK (internal -> peer)
+            self.log_packet(
+                &[],
+                Transport::Tcp,
+                internal_address,
+                peer_address,
+                Some(TcpFlags{syn: false, ack: true, fin: true}),
+            ).await;
+
+            // ACK (peer -> internal)
+            self.log_packet(
+                &[],
+                Transport::Tcp,
+                peer_address,
+                internal_address,
+                Some(TcpFlags{syn: false, ack: true, fin: false}),
+            ).await;
+
+            // Clean up the map
+            tcp_map.remove(&TcpFlow {
                 source: internal_address,
                 dest: peer_address,
             });
-            let peer_to_internal = tcp_map.get(&TcpFlow {
+            tcp_map.remove(&TcpFlow {
                 source: peer_address,
                 dest: internal_address,
             });
-
-            if let (Some(mut internal_to_peer), Some(mut peer_to_internal)) = (internal_to_peer, peer_to_internal) {
-                // FIN (peer -> internal)
-                self.log_packet(
-                    &[],
-                    Transport::Tcp,
-                    peer_address,
-                    internal_address,
-                    Some(TcpFlags{syn: false, ack: false, fin: true}),
-                ).await;
-
-                // FIN+ACK (internal -> peer)
-                self.log_packet(
-                    &[],
-                    Transport::Tcp,
-                    internal_address,
-                    peer_address,
-                    Some(TcpFlags{syn: false, ack: true, fin: true}),
-                ).await;
-
-                // ACK (peer -> internal)
-                self.log_packet(
-                    &[],
-                    Transport::Tcp,
-                    peer_address,
-                    internal_address,
-                    Some(TcpFlags{syn: false, ack: true, fin: false}),
-                ).await;
-
-                // Clean up the map
-                tcp_map.remove(&TcpFlow {
-                    source: internal_address,
-                    dest: peer_address,
-                });
-                tcp_map.remove(&TcpFlow {
-                    source: peer_address,
-                    dest: internal_address,
-                });
-            }
         }
     }
 
+    /// This logs a packet. It fakes out the various headers and then passes the packet to a background writer task that handles the writing to disk
     pub async fn log_packet(
         &self,
         payload: &[u8],
@@ -224,8 +213,9 @@ impl PcapLogger {
                     // Fetch and update the acknowledgment number for the opposite flow
                     if let Some(mut opposite_state) = tcp_map.get_mut(&TcpFlow { source: dest, dest: src }) {
                         ack = opposite_state.next_seq;
-                        if flags.map_or(false, |f| f.ack) {
-                            opposite_state.next_ack = seq;
+                        // next ACK updates only if there's date or SYN|FIN (i.e., no update on pure ACK from handshake)
+                        if payload.len() > 0 || flags.as_ref().map_or(false, |f| f.syn || f.fin) {
+                            opposite_state.next_ack = seq + payload.len() as u32 + if flags.as_ref().map_or(false, |f| f.syn || f.fin) { 1 } else { 0 };
                         }
                     }
                 }
