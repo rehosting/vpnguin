@@ -24,8 +24,6 @@ struct TcpFlow {
 struct TcpState {
     next_seq: u32,
     next_ack: u32,
-    last_payload_len: usize,
-    seen_syn: bool,
 }
 
 // Decided to make this a struct so things are more readable
