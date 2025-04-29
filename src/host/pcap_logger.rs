@@ -1,4 +1,4 @@
-use crate::Transport;
+use crate::{Transport, PacketDirection, PacketDirection::{HostToGuest, GuestToHost}};
 
 use std::{
     net::{SocketAddr, IpAddr},
@@ -97,6 +97,7 @@ impl PcapLogger {
                 peer_address,
                 internal_address,
                 Some(TcpFlags{syn: true, ack: false, fin: false}),
+                HostToGuest,
             ).await;
 
             // SYN+ACK (internal -> peer)
@@ -106,6 +107,7 @@ impl PcapLogger {
                 internal_address,
                 peer_address,
                 Some(TcpFlags{syn: true, ack: true, fin: false}),
+                GuestToHost,
             ).await;
 
             // ACK (peer -> internal)
@@ -115,6 +117,7 @@ impl PcapLogger {
                 peer_address,
                 internal_address,
                 Some(TcpFlags{syn: false, ack: true, fin: false}),
+                HostToGuest,
             ).await;
         }
     }
@@ -129,6 +132,7 @@ impl PcapLogger {
                 peer_address,
                 internal_address,
                 Some(TcpFlags{syn: false, ack: false, fin: true}),
+                HostToGuest,
             ).await;
 
             // FIN+ACK (internal -> peer)
@@ -138,6 +142,7 @@ impl PcapLogger {
                 internal_address,
                 peer_address,
                 Some(TcpFlags{syn: false, ack: true, fin: true}),
+                GuestToHost,
             ).await;
 
             // ACK (peer -> internal)
@@ -147,6 +152,7 @@ impl PcapLogger {
                 peer_address,
                 internal_address,
                 Some(TcpFlags{syn: false, ack: true, fin: false}),
+                HostToGuest,
             ).await;
 
             // Clean up the map
@@ -169,14 +175,21 @@ impl PcapLogger {
         src: SocketAddr,
         dest: SocketAddr,
         flags: Option<TcpFlags>,
+        direction: PacketDirection,
     ) {
         let mut buf: Vec<u8> = Vec::new();
 
-        // TODO: grab MACs from Host and Guest
-        let builder = PacketBuilder::ethernet2(
-            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
-        );
+        // Always use static MAC addresses to help make host/guest identifiable
+        let host_mac = [0x48, 0x4F, 0x53, 0x54, 0x00, 0x00]; // "HOST"
+        let guest_mac = [0x47, 0x55, 0x45, 0x53, 0x54, 0x00]; // "GUEST"
+
+        // Flip the MAC addresses based on the direction
+        let (src_mac, dest_mac) = match direction {
+            HostToGuest => (host_mac, guest_mac),
+            GuestToHost => (guest_mac, host_mac),
+        };
+
+        let builder = PacketBuilder::ethernet2( src_mac, dest_mac);
 
         let builder = match (src.ip(), dest.ip()) {
             (IpAddr::V4(src_ip), IpAddr::V4(dest_ip)) => builder.ipv4(

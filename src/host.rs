@@ -1,5 +1,5 @@
 //! Host implementation.
-use crate::{write_event, Host, HostRequest, Transport};
+use crate::{write_event, Host, HostRequest, Transport, PacketDirection::{GuestToHost, HostToGuest}};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::{
@@ -322,7 +322,7 @@ async fn process_tcp_client(
                 // Forward to client
                 stream.write_all(&buf_to_client[..bytes_read]).await.context("failed to write to stream")?;
                 bytes_from_guest += bytes_read; // Update bytes from guest
-                pcap_logger.log_packet(&buf_to_client[..bytes_read], Transport::Tcp, internal_address, log_client_addr, None).await;
+                pcap_logger.log_packet(&buf_to_client[..bytes_read], Transport::Tcp, internal_address, log_client_addr, None, GuestToHost).await;
             }
 
             // Data from stream to vsock (client to guest)
@@ -340,7 +340,7 @@ async fn process_tcp_client(
                 // Forward to guest
                 vsock.write_all(&buf_to_guest[..bytes_read]).await.context("failed to write to vsock")?;
                 bytes_to_guest += bytes_read; // Update bytes to guest
-                pcap_logger.log_packet(&buf_to_guest[..bytes_read], Transport::Tcp, log_client_addr, internal_address, None).await;
+                pcap_logger.log_packet(&buf_to_guest[..bytes_read], Transport::Tcp, log_client_addr, internal_address, None, HostToGuest).await;
             }
         }
     }
@@ -470,7 +470,7 @@ async fn forward_udp_client(
             .write_all(&data)
             .await
             .context("unable to write datagram")?;
-        pcap_logger.log_packet(&data, Transport::Udp, source_address, internal_address, None).await;
+        pcap_logger.log_packet(&data, Transport::Udp, source_address, internal_address, None, HostToGuest).await;
     }
     Ok(())
 }
@@ -498,6 +498,6 @@ async fn forward_udp_to_client(
             .send_to(&buffer, &client_address)
             .await
             .context("unable to send datagram")?;
-        pcap_logger.log_packet(&buffer[..n], Transport::Udp, internal_address, peer_address, None).await;
+        pcap_logger.log_packet(&buffer[..n], Transport::Udp, internal_address, peer_address, None, GuestToHost).await;
     }
 }

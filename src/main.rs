@@ -119,6 +119,13 @@ impl Display for Transport {
     }
 }
 
+/// This tracks packet direction when logging
+#[derive(Debug, Clone, Copy)]
+pub enum PacketDirection {
+    HostToGuest,
+    GuestToHost,
+}
+
 /// Main.
 pub fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
