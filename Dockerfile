@@ -52,6 +52,8 @@ RUN RUSTFLAGS='-C target-feature=+crt-static -C linker=/opt/cross/arm-linux-musl
         cargo build --target arm-unknown-linux-musleabi --release
 RUN RUSTFLAGS='-C target-feature=+crt-static -C linker=/opt/cross/arm-linux-musleabihf/bin/arm-linux-musleabihf-gcc' \
         cargo build --target arm-unknown-linux-musleabihf --release
+RUN RUSTFLAGS='-C target-feature=+crt-static -C linker=/opt/cross/aarch64-linux-musl/bin/aarch64-linux-musl-gcc' \
+        cargo build --target aarch64-unknown-linux-musl --release
 RUN RUSTFLAGS='-C target-feature=+crt-static -C linker=powerpc-linux-gnu-gcc' \
         cargo build --target powerpc-unknown-linux-gnu --release
 RUN RUSTFLAGS='-C target-feature=+crt-static -C linker=powerpc64-linux-gnu-gcc' \
@@ -92,6 +94,9 @@ RUN mkdir -p vpn && \
     # armel
     mkdir -p vpn/armel && \
     cp /app/target/arm-unknown-linux-musleabi/release/vsock_vpn vpn/armel/vpn && \
+    # aarch64
+    mkdir -p vpn/aarch64 && \
+    cp /app/target/aarch64-unknown-linux-musl/release/vsock_vpn vpn/aarch64/vpn && \
     # mipseb and mips64eb
     mkdir -p vpn/mipseb vpn/mips64eb && \
     cp /app/target/mips-unknown-linux-musl/release/vsock_vpn vpn/mipseb/vpn && \
