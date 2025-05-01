@@ -345,7 +345,7 @@ async fn process_tcp_client(
         }
     }
 
-    pcap_logger.close_tcp_stream(peer_address, internal_address).await;
+    pcap_logger.close_tcp_stream(log_client_addr, internal_address).await;
 
     // Connection statistics logging
     if let Some(outdir) = &command.outdir {
