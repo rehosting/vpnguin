@@ -134,20 +134,26 @@ pub fn main() -> Result<()> {
         Daemonize::new().start()?;
     }
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let result = match conf.command {
-                Command::Guest(ref command) => guest::execute(command).await,
-                Command::Host(ref command) => host::execute(command).await,
-            };
+    let result = match conf.command {
+        Command::Guest(ref command) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()?;
+            rt.block_on(guest::execute(command))
+        }
+        Command::Host(ref command) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(host::execute(command))
+        }
+    };
 
-            if let Err(e) = result {
-                error!("{e:?}");
-                ::std::process::exit(1);
-            }
-        });
+    if let Err(e) = result {
+        error!("{e:?}");
+        ::std::process::exit(1);
+    }
 
     Ok(())
 }
