@@ -18,6 +18,9 @@ use tokio::{
 };
 use tokio_vsock::{VsockAddr, VsockStream};
 use tokio::fs::OpenOptions;
+// host.rs
+use tokio::time::{sleep, Duration}; // add this
+
 
 mod pcap_logger;
 use pcap_logger::PcapLogger;
@@ -88,6 +91,8 @@ pub async fn execute(command: &Host) -> Result<()> {
             x
         */
         if line.is_empty() {
+            // EOF: back off so we don’t hot-spin
+            sleep(Duration::from_millis(200)).await;
             continue
         }
 
