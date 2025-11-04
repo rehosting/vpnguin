@@ -91,15 +91,31 @@ pub enum GuestRequest {
 /// Host request.
 #[derive(Debug, Deserialize, Serialize)]
 pub enum HostRequest {
-    /// Forward data.
-    Forward {
+    /// Forward a TCP connection.
+    ForwardTcp {
         /// Internal address.
         internal_address: SocketAddr,
-        /// Transport.
-        transport: Transport,
         /// Source address (for spoofing).
         source_address: SocketAddr,
     },
+    /// Start a multiplexed UDP proxy.
+    ForwardUdpMux {
+        /// Internal address.
+        internal_address: SocketAddr,
+        /// Source address (for spoofing).
+        source_address: SocketAddr,
+    },
+}
+
+/// A multiplexed UDP packet.
+/// This is sent over the shared vsock stream in both directions.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UdpMuxPacket {
+    /// The external client's address.
+    pub client_addr: SocketAddr,
+    /// The UDP payload.
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
 }
 
 /// Transport.
@@ -169,6 +185,9 @@ where
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => return Ok(None),
     };
+    if n == 0 {
+        return Ok(None); // Clean EOF
+    }
     let mut buffer = vec![0u8; n as _];
     timeout(
         Duration::from_secs(VSOCK_READ_TIMEOUT_SECS),
