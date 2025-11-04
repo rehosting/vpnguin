@@ -126,17 +126,6 @@ async fn process_client(vsock: VsockStream, peer_address: VsockAddr) -> Result<(
     Ok(())
 }
 
-/// Proxy TCP.
-async fn proxy_tcp(
-    mut vsock: VsockStream,
-    peer_address: VsockAddr,
-    mut stream: TcpStream,
-) -> anyhow::Result<()> {
-    stream.set_nodelay(true)?;
-    let _ = tokio::io::copy_bidirectional(&mut vsock, &mut stream).await?;
-    debug!(peer = peer_address.to_string(), "Proxy operation completed");
-    Ok(())
-}
 
 /// Manages a single UDP client's session.
 async fn forward_udp_client_mux(
