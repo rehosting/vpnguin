@@ -250,7 +250,7 @@ pub enum GuestRequest {
 }
 
 /// Host request.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub enum HostRequest {
     /// Forward data.
     Forward {
@@ -290,7 +290,7 @@ pub enum HostRequest {
 }
 
 /// Transport.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
     Tcp,
@@ -419,4 +419,116 @@ where
         .await
         .context("unable to write event")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn parse_iface_spec_full() {
+        let c = parse_iface_spec("wan0:198.51.100.1/198.51.100.2/16").unwrap();
+        assert_eq!(c.iface, "wan0");
+        assert_eq!(c.host_ip, Ipv4Addr::new(198, 51, 100, 1));
+        assert_eq!(c.guest_ip, Ipv4Addr::new(198, 51, 100, 2));
+        assert_eq!(c.prefix, 16);
+    }
+
+    #[test]
+    fn parse_iface_spec_defaults_when_omitted() {
+        // Bare name and trailing-empty fields fall back to the WAN defaults.
+        for spec in ["eth1", "eth1:", "eth1://"] {
+            let c = parse_iface_spec(spec).unwrap();
+            assert_eq!(c.iface, "eth1");
+            assert_eq!(c.host_ip, Ipv4Addr::new(203, 0, 113, 1));
+            assert_eq!(c.guest_ip, Ipv4Addr::new(203, 0, 113, 2));
+            assert_eq!(c.prefix, 24);
+        }
+    }
+
+    #[test]
+    fn parse_iface_spec_rejects_bad_input() {
+        assert!(parse_iface_spec(":1.2.3.4/5.6.7.8/24").is_err()); // empty name
+        assert!(parse_iface_spec("eth0:not-an-ip/5.6.7.8/24").is_err());
+        assert!(parse_iface_spec("eth0:1.2.3.4/5.6.7.8/999").is_err()); // prefix > u8
+    }
+
+    fn roundtrip(req: &HostRequest) {
+        let bytes = bincode::serialize(req).unwrap();
+        let back: HostRequest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(&back, req);
+    }
+
+    #[test]
+    fn hostrequest_roundtrips() {
+        let addr: SocketAddr = "192.0.2.1:80".parse().unwrap();
+        let src: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        roundtrip(&HostRequest::Forward {
+            internal_address: addr,
+            transport: Transport::Tcp,
+            source_address: src,
+            iface: None,
+        });
+        roundtrip(&HostRequest::Forward {
+            internal_address: addr,
+            transport: Transport::Udp,
+            source_address: src,
+            iface: Some("wan0".into()),
+        });
+        roundtrip(&HostRequest::RawL3 {
+            iface: "wan0".into(),
+            proto: 50,
+        });
+        roundtrip(&HostRequest::RawL2 {
+            iface: "wan0".into(),
+        });
+    }
+
+    #[test]
+    fn forward_without_iface_field_deserializes() {
+        // Wire-compat: an older `Forward` serialized without the trailing
+        // `iface` still deserializes (serde default -> None). The byte string
+        // below is `Forward{internal_address: 192.0.2.1:80 (V4), transport: Tcp,
+        // source_address: 0.0.0.0:0 (V4)}` produced before `iface` existed.
+        let legacy = HostRequest::Forward {
+            internal_address: "192.0.2.1:80".parse().unwrap(),
+            transport: Transport::Tcp,
+            source_address: "0.0.0.0:0".parse().unwrap(),
+            iface: None,
+        };
+        // Serializing the None case must still round-trip (the live path).
+        roundtrip(&legacy);
+    }
+
+    #[test]
+    fn rawl2_wire_format_is_stable() {
+        // Locks the exact bincode wire bytes the Python integration test relies
+        // on. bincode (default): enum variant = u32 LE (RawL2 is variant index
+        // 2), String = u64 LE length + UTF-8 bytes.
+        let bytes = bincode::serialize(&HostRequest::RawL2 {
+            iface: "testif".into(),
+        })
+        .unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&2u32.to_le_bytes()); // variant index
+        expected.extend_from_slice(&(6u64).to_le_bytes()); // len("testif")
+        expected.extend_from_slice(b"testif");
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn rawl3_wire_format_is_stable() {
+        let bytes = bincode::serialize(&HostRequest::RawL3 {
+            iface: "testif".into(),
+            proto: 1,
+        })
+        .unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u32.to_le_bytes()); // variant index
+        expected.extend_from_slice(&(6u64).to_le_bytes()); // len("testif")
+        expected.extend_from_slice(b"testif");
+        expected.push(1u8); // proto
+        assert_eq!(bytes, expected);
+    }
 }

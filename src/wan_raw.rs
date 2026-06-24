@@ -164,6 +164,41 @@ fn decode_hex(s: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_hex_basic_and_separators() {
+        assert_eq!(decode_hex("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(decode_hex("de:ad be ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert!(decode_hex("abc").is_err()); // odd length
+        assert!(decode_hex("zz").is_err()); // non-hex
+    }
+
+    #[test]
+    fn checksum_zeroes_out() {
+        // The Internet checksum of a buffer that already contains its own
+        // checksum must be zero (the standard verification property).
+        let mut icmp = vec![8u8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        icmp.extend_from_slice(b"payload!");
+        let c = checksum(&icmp);
+        icmp[2..4].copy_from_slice(&c.to_be_bytes());
+        assert_eq!(checksum(&icmp), 0);
+    }
+
+    #[test]
+    fn icmp_echo_is_wellformed() {
+        let p = build_icmp_echo(Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2), 0x1234, 0);
+        assert_eq!(p[0] >> 4, 4); // IPv4
+        assert_eq!(p[9], 1); // protocol ICMP
+        let ihl = ((p[0] & 0x0f) as usize) * 4;
+        assert_eq!(p[ihl], 8); // ICMP echo request
+        assert_eq!(checksum(&p[..ihl]), 0); // valid IP header checksum
+        assert_eq!(checksum(&p[ihl..]), 0); // valid ICMP checksum
+    }
+}
+
 /// Human summary of a received IPv4 packet.
 fn describe(pkt: &[u8]) -> String {
     if pkt.len() < 20 || (pkt[0] >> 4) != 4 {
