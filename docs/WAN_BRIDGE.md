@@ -91,6 +91,3 @@ turns into `--own-iface` flags. With no `interfaces` declared, nothing changes.
   L3 / raw L2 vsock ports and bridges each to its stack.
 - `src/main.rs` — CLI + the `Forward{…, iface}` / `RawL3` / `RawL2` protocol.
 - `src/wan_probe.rs`, `src/wan_raw.rs`, `src/wan_l2.rs` — host-side drivers.
-
-`Dockerfile.wan-minimal` builds a 2-arch (one guest + host) `vpn.tar.gz` for fast
-iteration; the normal multi-arch build is unchanged.
