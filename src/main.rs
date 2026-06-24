@@ -91,15 +91,31 @@ pub enum GuestRequest {
 /// Host request.
 #[derive(Debug, Deserialize, Serialize)]
 pub enum HostRequest {
-    /// Forward data.
-    Forward {
+    /// Forward a TCP connection.
+    ForwardTcp {
         /// Internal address.
         internal_address: SocketAddr,
-        /// Transport.
-        transport: Transport,
         /// Source address (for spoofing).
         source_address: SocketAddr,
     },
+    /// Start a multiplexed UDP proxy.
+    ForwardUdpMux {
+        /// Internal address.
+        internal_address: SocketAddr,
+        /// Source address (for spoofing).
+        source_address: SocketAddr,
+    },
+}
+
+/// A multiplexed UDP packet.
+/// This is sent over the shared vsock stream in both directions.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UdpMuxPacket {
+    /// The external client's address.
+    pub client_addr: SocketAddr,
+    /// The UDP payload.
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
 }
 
 /// Transport.
@@ -134,20 +150,26 @@ pub fn main() -> Result<()> {
         Daemonize::new().start()?;
     }
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let result = match conf.command {
-                Command::Guest(ref command) => guest::execute(command).await,
-                Command::Host(ref command) => host::execute(command).await,
-            };
+    let result = match conf.command {
+        Command::Guest(ref command) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()?;
+            rt.block_on(guest::execute(command))
+        }
+        Command::Host(ref command) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(host::execute(command))
+        }
+    };
 
-            if let Err(e) = result {
-                error!("{e:?}");
-                ::std::process::exit(1);
-            }
-        });
+    if let Err(e) = result {
+        error!("{e:?}");
+        ::std::process::exit(1);
+    }
 
     Ok(())
 }
@@ -163,6 +185,9 @@ where
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => return Ok(None),
     };
+    if n == 0 {
+        return Ok(None); // Clean EOF
+    }
     let mut buffer = vec![0u8; n as _];
     timeout(
         Duration::from_secs(VSOCK_READ_TIMEOUT_SECS),

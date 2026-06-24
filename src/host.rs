@@ -1,23 +1,23 @@
 //! Host implementation.
-use crate::{write_event, Host, HostRequest, Transport, PacketDirection::{GuestToHost, HostToGuest}};
+use crate::{
+    write_event, read_event, Host, HostRequest, Transport, UdpMuxPacket,
+    PacketDirection::{GuestToHost, HostToGuest}
+};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::{
-    collections::{
-        hash_map::Entry::{Occupied, Vacant},
-        HashMap,
-    },
     net::SocketAddr,
     sync::Arc,
     path::PathBuf,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite, BufWriter},
     net::{TcpListener, TcpStream, UdpSocket, UnixStream},
-    sync::mpsc::{channel, Receiver, Sender},
+    select,
 };
 use tokio_vsock::{VsockAddr, VsockStream};
 use tokio::fs::OpenOptions;
+use tokio::time::{sleep, Duration};
 
 mod pcap_logger;
 use pcap_logger::PcapLogger;
@@ -76,19 +76,19 @@ pub async fn execute(command: &Host) -> Result<()> {
     info!("processing events");
     loop {
         let mut line = String::new();
-        input
+        
+        let bytes_read = input
             .read_line(&mut line)
             .await
             .context("unable to read new line")?;
 
-        /*
-            // XXX: Dropped support for unspecified external addr
-            let mut x = internal_address.clone();
-            x.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-            x
-        */
-        if line.is_empty() {
+        if bytes_read == 0 {
+            sleep(Duration::from_millis(200)).await;
             continue
+        }
+        
+        if line.trim().is_empty() {
+            continue;
         }
 
         let Ok(record) = csv_line::from_str::<Entry>(&line) else {
@@ -139,8 +139,8 @@ pub async fn execute(command: &Host) -> Result<()> {
                 let command = command.clone();
                 let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, socket, pcap_logger).await {
-                        error!("unable to execute udp proxy: {e}");
+                    if let Err(e) = execute_udp_mux_proxy(command, record.internal_address, record.source_address, socket, pcap_logger).await {
+                        error!("unable to execute udp mux proxy: {e}");
                     }
                 });
             }
@@ -252,9 +252,8 @@ async fn process_tcp_client(
         source = source_address.to_string(),
         "issuing forwarding request"
     );
-    let e = HostRequest::Forward {
+    let e = HostRequest::ForwardTcp {
         internal_address,
-        transport: Transport::Tcp,
         source_address
     };
     write_event(&mut vsock, &e).await?;
@@ -294,6 +293,8 @@ async fn process_tcp_client(
     };
 
     // Forward data with logging
+    let (mut vsock_read, mut vsock_write) = vsock.socksplit();
+    let (mut stream_read, mut stream_write) = stream.split();
     let mut buf_to_client = vec![0; 4096];
     let mut buf_to_guest = vec![0; 4096];
 
@@ -304,7 +305,7 @@ async fn process_tcp_client(
     loop {
         tokio::select! {
             // Data from vsock to stream (guest to client)
-            bytes_read = vsock.read(&mut buf_to_client) => {
+            bytes_read = vsock_read.read(&mut buf_to_client) => {
                 let bytes_read = bytes_read.context("failed to read from vsock")?;
                 if bytes_read == 0 { break; }
 
@@ -320,13 +321,13 @@ async fn process_tcp_client(
 
 
                 // Forward to client
-                stream.write_all(&buf_to_client[..bytes_read]).await.context("failed to write to stream")?;
+                stream_write.write_all(&buf_to_client[..bytes_read]).await.context("failed to write to stream")?;
                 bytes_from_guest += bytes_read; // Update bytes from guest
                 pcap_logger.log_packet(&buf_to_client[..bytes_read], Transport::Tcp, internal_address, log_client_addr, None, GuestToHost).await;
             }
 
             // Data from stream to vsock (client to guest)
-            bytes_read = stream.read(&mut buf_to_guest) => {
+            bytes_read = stream_read.read(&mut buf_to_guest) => {
                 let bytes_read = bytes_read.context("failed to read from stream")?;
                 if bytes_read == 0 { break; }
 
@@ -338,7 +339,7 @@ async fn process_tcp_client(
 
 
                 // Forward to guest
-                vsock.write_all(&buf_to_guest[..bytes_read]).await.context("failed to write to vsock")?;
+                vsock_write.write_all(&buf_to_guest[..bytes_read]).await.context("failed to write to vsock")?;
                 bytes_to_guest += bytes_read; // Update bytes to guest
                 pcap_logger.log_packet(&buf_to_guest[..bytes_read], Transport::Tcp, log_client_addr, internal_address, None, HostToGuest).await;
             }
@@ -361,8 +362,10 @@ async fn process_tcp_client(
     Ok(())
 }
 
-/// Execute a UDP proxy.
-async fn execute_udp_proxy(
+/// Execute a multiplexed UDP proxy.
+/// This function is spawned ONCE per UDP service.
+/// It handles all external clients over a single vsock stream.
+async fn execute_udp_mux_proxy(
     command: Host,
     internal_address: SocketAddr,
     source_address: SocketAddr,
@@ -374,130 +377,89 @@ async fn execute_udp_proxy(
         external = external_address.to_string(),
         internal = internal_address.to_string(),
         source = source_address.to_string(),
-        "executing udp proxy"
+        "executing multiplexed udp proxy"
     );
 
     let socket = Arc::new(socket);
-    let mut buffer = [0u8; 8192];
-    let mut clients: HashMap<SocketAddr, Sender<Vec<u8>>> = HashMap::new();
-    loop {
-        // Wait for a datagram
-        let (n, client_address) = socket
-            .recv_from(&mut buffer)
-            .await
-            .context("unable to receive client datagram")?;
-        let q = match clients.entry(client_address) {
-            Occupied(e) => e.get().clone(),
-            Vacant(e) => {
-                let command = command.clone();
-                let socket = socket.clone();
-                let (q_tx, q_rx) = channel(16);
-                let pcap_logger = pcap_logger.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        forward_udp_client(command, socket, client_address, internal_address, source_address, q_rx, Arc::new(pcap_logger))
-                            .await
-                    {
-                        error!(
-                            client = client_address.to_string(),
-                            "unable to forward udp client: {e}"
-                        );
-                    }
-                });
-                e.insert(q_tx).clone()
-            }
-        };
+    let pcap_logger = Arc::new(pcap_logger);
 
-        // Forward to the dedicated client task
-        if let Err(e) = q.send(buffer[..n].to_vec()).await {
-            error!("unable to forward client datagram to task: {e}");
-        }
-    }
-}
+    // Create ONE vsock bridge for this entire service
+    let vsock = connect_to_socket(
+        command.vhost_user_path,
+        command.command_port,
+        command.context_id,
+    )
+    .await?;
+    let (mut vsock_read, vsock_write) = vsock.socksplit();
+    let mut vsock_write = BufWriter::new(vsock_write);
 
-/// Forward a UDP client.
-async fn forward_udp_client(
-    command: Host,
-    socket: Arc<UdpSocket>,
-    client_address: SocketAddr,
-    internal_address: SocketAddr,
-    source_address: SocketAddr,
-    mut queue: Receiver<Vec<u8>>,
-    pcap_logger: Arc<PcapLogger>,
-) -> Result<()> {
-    let external_address = socket.local_addr()?;
-
-    // Create vsock bridge and split it
-    let vsock = connect_to_socket(command.vhost_user_path, command.command_port,
-                                      command.context_id).await?;
-    let (vsock_rx, mut vsock_tx) = vsock.socksplit();
-
-    // Forward data to the guest
-    debug!(
-        external = external_address.to_string(),
-        internal = internal_address.to_string(),
-        source = source_address.to_string(),
-        "issuing open connection request"
-    );
-    let e = HostRequest::Forward {
+    // Send the init request to the guest
+    let e = HostRequest::ForwardUdpMux {
         internal_address,
-        transport: Transport::Udp,
-        source_address: source_address,
+        source_address,
     };
-    write_event(&mut vsock_tx, &e).await?;
+    write_event(&mut vsock_write, &e).await?;
+    vsock_write.flush().await?;
 
-    debug!(
-        client = client_address.to_string(),
-        external = external_address.to_string(),
-        internal = internal_address.to_string(),
-        source = source_address.to_string(),
-        "forwarding udp datagrams"
-    );
+    let mut socket_buf = vec![0u8; 8192];
 
-    // Forward data
-    let pcap_logger_to_client = pcap_logger.clone();
-    tokio::spawn(async move {
-        if let Err(e) = forward_udp_to_client(socket, vsock_rx, client_address, pcap_logger_to_client, internal_address, source_address).await {
-            error!("unable to forward udp to client: {e}");
-        }
-    });
-    while let Some(data) = queue.recv().await {
-        vsock_tx
-            .write_u16(data.len() as _)
-            .await
-            .context("unable to write datagram size")?;
-        vsock_tx
-            .write_all(&data)
-            .await
-            .context("unable to write datagram")?;
-        pcap_logger.log_packet(&data, Transport::Udp, source_address, internal_address, None, HostToGuest).await;
-    }
-    Ok(())
-}
-
-/// Forward UDP to client.
-async fn forward_udp_to_client(
-    socket: Arc<UdpSocket>,
-    mut vsock_rx: Box<dyn AsyncRead + Unpin + Send>,
-    client_address: SocketAddr,
-    pcap_logger: Arc<PcapLogger>,
-    internal_address: SocketAddr,
-    peer_address: SocketAddr
-) -> Result<()> {
-    let mut buffer = [0u8; 8192];
     loop {
-        let n = vsock_rx
-            .read_u16()
-            .await
-            .context("unable to read datagram size")? as _;
-        vsock_rx
-            .read_exact(&mut buffer[..n])
-            .await
-            .context("unable to read datagram")?;
-        socket
-            .send_to(&buffer, &client_address)
-            .await
-            .context("unable to send datagram")?;
-        pcap_logger.log_packet(&buffer[..n], Transport::Udp, internal_address, peer_address, None, GuestToHost).await;
+        select! {
+            // --- Task 1: Guest -> Host -> External Client ---
+            result = read_event::<_, UdpMuxPacket>(&mut vsock_read) => {
+                match result {
+                    Ok(Some(packet)) => {
+                        let client_addr = packet.client_addr;
+                        let data = packet.data;
+                        
+                        pcap_logger.log_packet(&data, Transport::Udp, internal_address, client_addr, None, GuestToHost).await;
+
+                        if let Err(e) = socket.send_to(&data, client_addr).await {
+                            error!(client = %client_addr, "failed to send datagram to external client: {e}");
+                        }
+                    },
+                    Ok(None) => {
+                        info!("Vsock stream closed by guest, shutting down UDP proxy.");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Failed to read from vsock: {e}. Shutting down UDP proxy.");
+                        break;
+                    }
+                }
+            }
+
+            // --- Task 2: External Client -> Host -> Guest ---
+            result = socket.recv_from(&mut socket_buf) => {
+                 match result {
+                    Ok((n, client_addr)) => {
+                        let data = socket_buf[..n].to_vec();
+
+                        let log_client_addr = SocketAddr::new(source_address.ip(), client_addr.port());
+                        pcap_logger.log_packet(&data, Transport::Udp, log_client_addr, internal_address, None, HostToGuest).await;
+
+                        let packet = UdpMuxPacket {
+                            client_addr,
+                            data,
+                        };
+                        
+                        if let Err(e) = write_event(&mut vsock_write, &packet).await {
+                            error!("Failed to write to vsock: {e}. Shutting down UDP proxy.");
+                            break;
+                        }
+                        if let Err(e) = vsock_write.flush().await {
+                            error!("Failed to flush vsock writer: {e}. Shutting down UDP proxy.");
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to read from external socket: {e}. Shutting down UDP proxy.");
+                        break;
+                    }
+                }
+            }
+        }
     }
+
+    Ok(())
 }
