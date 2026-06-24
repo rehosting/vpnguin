@@ -19,6 +19,8 @@ tracing = "0"
 csv = "1.1"
 tracing-subscriber = "0"
 csv-line = "0.2.0"
+# Userspace TCP/IP stack for the WAN datapath (tap-backed). Linux-only phy.
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-raw", "phy-tuntap_interface"] }
 
 # These crates are for host pcap stuff, no need to grab them on other arches
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
