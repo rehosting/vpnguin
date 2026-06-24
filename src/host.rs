@@ -22,7 +22,7 @@ use tokio::fs::OpenOptions;
 mod pcap_logger;
 use pcap_logger::PcapLogger;
 
-trait IntoSplit {
+pub(crate) trait IntoSplit {
     fn socksplit(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>);
 }
 
@@ -46,7 +46,7 @@ impl IntoSplit for VsockStream {
     }
 }
 
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + IntoSplit { }
+pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + IntoSplit { }
 impl<T: AsyncRead + AsyncWrite + Send + IntoSplit> AsyncReadWrite for T {}
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +55,10 @@ struct Entry {
     internal_address: SocketAddr,
     external_address: SocketAddr,
     source_address: SocketAddr,
+    /// Owned interface to route through (the interface matrix). Empty string =
+    /// the default loopback ("LAN") path. Always present in the event line so the
+    /// CSV column count is stable.
+    iface: String,
 }
 
 /// Execute the host endpoint.
@@ -96,12 +100,20 @@ pub async fn execute(command: &Host) -> Result<()> {
             continue;
         };
 
+        // Empty iface column = the default loopback path.
+        let iface = if record.iface.is_empty() {
+            None
+        } else {
+            Some(record.iface.clone())
+        };
+
         // Create a proxy and vsock bridge
         info!(
             transport = record.transport.to_string(),
             internal = record.internal_address.to_string(),
             external = record.external_address.to_string(),
             source = record.source_address.to_string(),
+            iface = iface.as_deref().unwrap_or("<loopback>"),
             "creating proxy"
         );
 
@@ -119,7 +131,7 @@ pub async fn execute(command: &Host) -> Result<()> {
                 let command = command.clone();
                 let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, record.source_address, listener, pcap_logger).await
+                    if let Err(e) = execute_tcp_proxy(command, record.internal_address, record.source_address, iface, listener, pcap_logger).await
                     {
                         error!("unable to execute tcp proxy: {e}");
                     }
@@ -139,7 +151,7 @@ pub async fn execute(command: &Host) -> Result<()> {
                 let command = command.clone();
                 let pcap_logger = pcap_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, socket, pcap_logger).await {
+                    if let Err(e) = execute_udp_proxy(command, record.internal_address, record.source_address, iface, socket, pcap_logger).await {
                         error!("unable to execute udp proxy: {e}");
                     }
                 });
@@ -153,6 +165,7 @@ async fn execute_tcp_proxy(
     command: Host,
     internal_address: SocketAddr,
     source_address: SocketAddr,
+    iface: Option<String>,
     listener: TcpListener,
     pcap_logger: PcapLogger,
 ) -> Result<()> {
@@ -170,9 +183,10 @@ async fn execute_tcp_proxy(
         let pcap_logger = pcap_logger.clone();
         let internal_address = internal_address.clone();
         let source_address = source_address.clone();
+        let iface = iface.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                process_tcp_client(command, internal_address, stream, peer_address, source_address, pcap_logger).await
+                process_tcp_client(command, internal_address, stream, peer_address, source_address, iface, pcap_logger).await
             {
                 error!("unable to process external client: {e}");
             }
@@ -180,7 +194,7 @@ async fn execute_tcp_proxy(
     }
 }
 
-async fn connect_to_socket(
+pub(crate) async fn connect_to_socket(
     vhost_user_path: Option<PathBuf>,
     command_port: u32,
     context_id: u32,
@@ -224,6 +238,7 @@ async fn process_tcp_client(
     mut stream: TcpStream,
     peer_address: SocketAddr,
     source_address: SocketAddr,
+    iface: Option<String>,
     pcap_logger: PcapLogger,
 ) -> Result<()> {
     info!(
@@ -255,9 +270,32 @@ async fn process_tcp_client(
     let e = HostRequest::Forward {
         internal_address,
         transport: Transport::Tcp,
-        source_address
+        source_address,
+        iface: iface.clone(),
     };
     write_event(&mut vsock, &e).await?;
+
+    // On the interface-routed path the guest sends a `wan_status` byte before any
+    // payload. Consume it; only a CONNECTED verdict has a stream to bridge.
+    if let Some(name) = &iface {
+        let status = vsock
+            .read_u8()
+            .await
+            .context("unable to read interface status byte")?;
+        if status != crate::wan_status::CONNECTED {
+            let verdict = match status {
+                crate::wan_status::FILTERED => "filtered",
+                crate::wan_status::REFUSED => "refused",
+                _ => "error",
+            };
+            info!(
+                internal = internal_address.to_string(),
+                iface = name.as_str(),
+                "interface-routed connection {verdict}; closing external client"
+            );
+            return Ok(());
+        }
+    }
 
     // Initialize counters for byte tracking
     let mut bytes_to_guest = 0;
@@ -366,9 +404,16 @@ async fn execute_udp_proxy(
     command: Host,
     internal_address: SocketAddr,
     source_address: SocketAddr,
+    iface: Option<String>,
     socket: UdpSocket,
     pcap_logger: PcapLogger,
 ) -> Result<()> {
+    if iface.is_some() {
+        warn!(
+            internal = internal_address.to_string(),
+            "interface-routed UDP not yet supported; using the loopback path"
+        );
+    }
     let external_address = socket.local_addr()?;
     info!(
         external = external_address.to_string(),
@@ -443,6 +488,8 @@ async fn forward_udp_client(
         internal_address,
         transport: Transport::Udp,
         source_address: source_address,
+        // Interface-routed UDP is not yet supported; always loopback.
+        iface: None,
     };
     write_event(&mut vsock_tx, &e).await?;
 
