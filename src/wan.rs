@@ -2,7 +2,7 @@
 //! interface, so connections we originate genuinely ingress on the firmware's
 //! WAN interface and traverse its netfilter `INPUT -i <wan>` chain.
 //!
-//! See `WAN_BRIDGE_DESIGN.md`. The kernel owns the WAN IP (e.g. 203.0.113.2) on
+//! See `docs/WAN_BRIDGE.md`. The kernel owns the WAN IP (e.g. 203.0.113.2) on
 //! the tap; smoltcp here is the remote peer (e.g. 203.0.113.1) on the same L2
 //! segment. A connect that the firewall ACCEPTs completes its handshake (port
 //! *open*); one that is DROPped never gets a SYN-ACK (reported *filtered*); a RST
