@@ -255,9 +255,25 @@ fn run_stack(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
-    let tuntap = match TunTapInterface::new(&cfg.iface, Medium::Ethernet) {
+    // Open the tap ourselves rather than via smoltcp's `TunTapInterface::new`.
+    // smoltcp 0.12 writes the TUNSETIFF flags into a 32-bit `ifr_data`, but the
+    // kernel reads a 16-bit `ifr_flags` short at that offset: on big-endian
+    // targets (mipseb, mips64eb, powerpc64) the flag bits land in the wrong half,
+    // so TUNSETIFF fails with EINVAL and no tap ever comes up. `open_tap_fd`
+    // writes a correctly-sized 16-bit `ifr_flags`, then we hand the fd to
+    // `from_fd`, which is endian-safe on every arch.
+    let tap_fd = match open_tap_fd(&cfg.iface) {
+        Ok(fd) => fd,
+        Err(e) => {
+            let _ = ready_tx.send(Err(format!("open tap '{}': {e}", cfg.iface)));
+            return;
+        }
+    };
+    let tuntap = match TunTapInterface::from_fd(tap_fd, Medium::Ethernet, TAP_MTU) {
         Ok(d) => d,
         Err(e) => {
+            // SAFETY: tap_fd is ours and not yet owned by smoltcp on this path.
+            unsafe { libc::close(tap_fd) };
             let _ = ready_tx.send(Err(format!("open tap '{}': {e}", cfg.iface)));
             return;
         }
@@ -620,6 +636,81 @@ fn smol_now(base: StdInstant) -> SmolInstant {
     SmolInstant::from_micros(base.elapsed().as_micros() as i64)
 }
 
+/// TUNSETIFF ioctl request number (`_IOW('T', 202, int)`). MIPS/PowerPC/SPARC
+/// use a different `_IOC` direction encoding (`0x8…` vs `0x4…`); this mirrors
+/// smoltcp's per-arch table so the tap opens on every guest arch. The endianness
+/// variants collapse (the number is byte-order independent), but they are listed
+/// to match upstream exactly.
+const TUNSETIFF: libc::c_ulong = if cfg!(any(
+    target_arch = "mips",
+    target_arch = "mips64",
+    target_arch = "powerpc",
+    target_arch = "powerpc64",
+    target_arch = "sparc64",
+)) {
+    0x8004_54CA
+} else {
+    0x4004_54CA
+};
+
+/// MTU of the tap-backed ethernet segment (standard 1500-byte IP payload). Kept
+/// explicit because we build the interface via `from_fd`, which (unlike `new`)
+/// does not query `SIOCGIFMTU`.
+const TAP_MTU: usize = 1500;
+
+/// The two `ifr_flags` bytes for a no-packet-info TAP (`IFF_TAP | IFF_NO_PI`),
+/// laid out as the kernel's native 16-bit `short`.
+///
+/// This is the crux of the big-endian fix: the field is a `short`, so it must be
+/// written as exactly two bytes in native order. smoltcp instead wrote a 32-bit
+/// `c_int`, whose significant bits sit in the high half on big-endian, making the
+/// kernel read `flags == 0` and reject TUNSETIFF with EINVAL.
+fn tap_ifr_flags() -> [u8; 2] {
+    const IFF_TAP: u16 = 0x0002;
+    const IFF_NO_PI: u16 = 0x1000;
+    (IFF_TAP | IFF_NO_PI).to_ne_bytes()
+}
+
+/// Build the 40-byte `ifreq` for TUNSETIFF: interface name, then the 16-bit
+/// `ifr_flags` short at offset `IFNAMSIZ` (16).
+fn build_tap_ifreq(iface: &str) -> [u8; 40] {
+    let mut ifr = [0u8; 40];
+    ifr[..iface.len()].copy_from_slice(iface.as_bytes());
+    let flags = tap_ifr_flags();
+    ifr[16] = flags[0];
+    ifr[17] = flags[1];
+    ifr
+}
+
+/// Open `/dev/net/tun` and attach a no-PI TAP named `iface`, returning the raw
+/// fd for smoltcp's `TunTapInterface::from_fd` (which closes it on drop). See the
+/// call site in `run_stack` for why we bypass `TunTapInterface::new`.
+fn open_tap_fd(iface: &str) -> std::io::Result<std::os::fd::RawFd> {
+    if iface.len() >= 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "interface name too long",
+        ));
+    }
+    // SAFETY: standard /dev/net/tun open + TUNSETIFF on a 40-byte ifreq.
+    unsafe {
+        let fd = libc::open(
+            b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
+            libc::O_RDWR | libc::O_NONBLOCK,
+        );
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut ifr = build_tap_ifreq(iface);
+        if libc::ioctl(fd, TUNSETIFF as _, ifr.as_mut_ptr() as *mut libc::c_void) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        Ok(fd)
+    }
+}
+
 /// Assign an IPv4 address + netmask to `iface` via ioctl (SIOCSIFADDR /
 /// SIOCSIFNETMASK). ifreq: 16-byte name, then a `sockaddr_in` (family u16 at
 /// offset 16, addr bytes at offset 20).
@@ -733,4 +824,44 @@ fn set_link_up(iface: &str) -> std::io::Result<()> {
         close(fd);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression guard for the big-endian TUNSETIFF bug. The kernel reads
+    // `ifr_flags` as a native 16-bit `short` at offset 16 of the ifreq; our two
+    // flag bytes must decode back to `IFF_TAP | IFF_NO_PI` there. (The bug was
+    // smoltcp writing a 32-bit int, whose low half is zero in the kernel's short
+    // on big-endian -> EINVAL. The definitive coverage is the owned_iface CI test
+    // on the big-endian arches; this locks the byte layout regardless of host.)
+    #[test]
+    fn tap_ifr_flags_land_in_the_kernel_short() {
+        let ifr = build_tap_ifreq("wan0");
+        assert_eq!(&ifr[..4], b"wan0");
+        // Native short at offset 16 == IFF_TAP | IFF_NO_PI.
+        assert_eq!(i16::from_ne_bytes([ifr[16], ifr[17]]), 0x1002);
+        // The flags occupy exactly the 16-bit field; the rest of the union stays
+        // zero (a 32-bit write would spill into offset 18/19 on little-endian and,
+        // worse, leave offset 16 zero on big-endian).
+        assert_eq!(&ifr[18..24], &[0u8; 6]);
+        assert_eq!(tap_ifr_flags().len(), 2);
+    }
+
+    #[test]
+    fn tunsetiff_matches_target_arch_encoding() {
+        let expected: libc::c_ulong = if cfg!(any(
+            target_arch = "mips",
+            target_arch = "mips64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "sparc64",
+        )) {
+            0x8004_54CA
+        } else {
+            0x4004_54CA
+        };
+        assert_eq!(TUNSETIFF, expected);
+    }
 }
