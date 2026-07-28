@@ -1,50 +1,103 @@
 name: Tag and Publish release
 
-# This repo builds itself via its own flake (`nix build .#dist`, see test.yml).
-# penguin consumes it as a flake input pinned to the tag this workflow cuts,
-# building the binaries from source at that tag -- so this release is a
-# version/provenance marker and publishes no binary asset.
+# Cuts a versioned release and attaches vpn.tar.gz: vsock_vpn cross-built for
+# every supported guest arch through this repo's own flake (`nix build .#dist`,
+# the same path test.yml validates) and packaged by
+# scripts/mk-release-tarball.sh into the layout penguin stages into
+# /igloo_static.
+#
+# penguin's normal consumption path does not need this asset -- it takes vpnguin
+# as a flake input pinned to the tag this workflow cuts, and penguin-tools ships
+# the same per-arch binaries inside penguin-tools.tar.gz. The asset is for
+# consumers outside that path, and for dropping into
+# penguin/local_packages/vpn.tar.gz.
 
 on:
   push:
     branches:
       - main
 
+# Building the asset takes minutes where the old tag-only job took seconds, so
+# two quick pushes to main can now overlap and race on the version bump. Queue
+# them rather than cancelling: a cancelled run could drop a half-uploaded asset.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: building the asset needs a Nix builder with the org
+    # cache, since it cross-compiles for every guest arch.
+    runs-on: rehosting-arc
     permissions:
       contents: write
+    env:
+      USER: runner
+      LOGNAME: runner
+      TMPDIR: /home/runner/_work/_temp
+      XDG_CACHE_HOME: /home/runner/_work/.cache
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare runner directories
+        run: mkdir -p "$TMPDIR" "$XDG_CACHE_HOME"
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq xz-utils
+
+      # Same org-shared Nix setup as test.yml: pins a modern Nix whose hashing
+      # matches the flake.lock and disables the KVM setup that Arc pods lack a
+      # working udevd for.
+      - name: Set up Nix
+        uses: rehosting/ci/actions/nix-setup@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          install-url: https://releases.nixos.org/nix/nix-2.31.2/install
+          enable-kvm: false
+          extra-nix-config: |
+            max-jobs = 8
+            cores = 8
+          cache-backend: cachix
+          cachix-name: rehosting-tools
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build release asset
+        run: ./scripts/mk-release-tarball.sh vpn.tar.gz
+
+      - name: Save package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnguin
+          path: vpn.tar.gz
+
       - name: Get next version
         uses: reecetech/version-increment@2023.10.1
         id: version
         with:
           use_api: true
 
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag and publish release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.v-version }}
-          release_name: Release ${{ steps.version.outputs.v-version }} ${{ github.ref }}
+          name: Release ${{ steps.version.outputs.v-version }} ${{ github.ref }}
           body: |
             Release ${{ steps.version.outputs.v-version }} @${{ github.ref }}
 
-            Binaries are built and distributed by penguin-tools
-            (penguin-tools.tar.gz); this release carries no binary asset.
-          draft: true
-          prerelease: false
+            `vpn.tar.gz` -- `vsock_vpn` cross-built for every supported guest
+            arch at this tag, laid out the way penguin stages it into
+            `/igloo_static`: `<arch>/vpn` per arch, plus `vpn/vpn.<arch>` flat
+            symlinks for the host side.
 
-      - name: Publish release
-        uses: StuYarrow/publish-release@v1.1.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          id: ${{ steps.create_release.outputs.id }}
+            penguin itself consumes this repo as a flake input pinned to this
+            tag, and penguin-tools ships the same binaries inside
+            `penguin-tools.tar.gz`; this asset is for consumers outside that
+            path.
+
+            Note: unlike the pre-v1.0.26 asset this omits 32-bit `powerpc`,
+            which is not in the flake's arch matrix.
+          files: vpn.tar.gz
+          draft: false
+          prerelease: false
