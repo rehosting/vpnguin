@@ -117,8 +117,9 @@ pub struct Guest {
     /// `Forward` requests carrying `iface=NAME` ingress on that interface and
     /// traverse its netfilter `INPUT -i NAME` chain. `NAME` must match the
     /// firmware's interface name (e.g. `wan_ifname`). Missing addressing fields
-    /// fall back to the WAN defaults (203.0.113.1/203.0.113.2/24). Example:
-    /// `--own-iface wan0:203.0.113.1/203.0.113.2/24`.
+    /// fall back to the WAN defaults (203.0.113.1/203.0.113.2/24). The optional
+    /// fourth and fifth fields are the carrier IP and VLAN ID, respectively:
+    /// `--own-iface wan0:203.0.113.1/203.0.113.2/24/203.0.113.3/2`.
     #[structopt(long = "own-iface")]
     own_iface: Vec<String>,
     /// Deprecated alias for a single `--own-iface` (uses --wan-host-ip etc.).
@@ -313,7 +314,8 @@ pub enum PacketDirection {
     GuestToHost,
 }
 
-/// Parse an `--own-iface` spec `NAME:HOST_IP/GUEST_IP/PREFIX` into a `WanConfig`.
+/// Parse an `--own-iface` spec
+/// `NAME:HOST_IP/GUEST_IP/PREFIX[/CARRIER_IP[/VLAN_ID]]` into a `WanConfig`.
 /// Missing addressing fields fall back to the WAN defaults so a bare
 /// `NAME:` (or `NAME`) is valid.
 fn parse_iface_spec(spec: &str) -> Result<crate::wan::WanConfig> {
@@ -345,12 +347,23 @@ fn parse_iface_spec(spec: &str) -> Result<crate::wan::WanConfig> {
             .with_context(|| format!("invalid prefix '{s}' in iface spec '{spec}'"))?,
         _ => DEF_PREFIX,
     };
-    Ok(crate::wan::WanConfig::new(
+    let carrier_ip = parse_or(parts.next(), guest_ip)?;
+    let vlan_id = match parts.next() {
+        Some(s) if !s.is_empty() => Some(
+            s.parse::<u16>()
+                .with_context(|| format!("invalid VLAN '{s}' in iface spec '{spec}'"))?,
+        ),
+        _ => None,
+    };
+    let mut config = crate::wan::WanConfig::new(
         name.to_string(),
         host_ip,
         guest_ip,
         prefix,
-    ))
+    );
+    config.carrier_ip = carrier_ip;
+    config.vlan_id = vlan_id;
+    Ok(config)
 }
 
 /// Main.
@@ -432,7 +445,17 @@ mod tests {
         assert_eq!(c.iface, "wan0");
         assert_eq!(c.host_ip, Ipv4Addr::new(198, 51, 100, 1));
         assert_eq!(c.guest_ip, Ipv4Addr::new(198, 51, 100, 2));
+        assert_eq!(c.carrier_ip, Ipv4Addr::new(198, 51, 100, 2));
         assert_eq!(c.prefix, 16);
+        assert_eq!(c.vlan_id, None);
+    }
+
+    #[test]
+    fn parse_iface_spec_vlan_target_and_carrier_are_separate() {
+        let c = parse_iface_spec("eth1:203.0.113.1/203.0.113.2/24/203.0.113.3/2").unwrap();
+        assert_eq!(c.guest_ip, Ipv4Addr::new(203, 0, 113, 2));
+        assert_eq!(c.carrier_ip, Ipv4Addr::new(203, 0, 113, 3));
+        assert_eq!(c.vlan_id, Some(2));
     }
 
     #[test]

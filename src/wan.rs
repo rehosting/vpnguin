@@ -20,7 +20,7 @@ use std::time::Instant as StdInstant;
 use anyhow::{anyhow, Result};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{
-    wait as phy_wait, Device, DeviceCapabilities, Medium, RxToken, TunTapInterface,
+    wait as phy_wait, Device, DeviceCapabilities, Medium, RxToken, TunTapInterface, TxToken,
 };
 use smoltcp::socket::{raw, tcp};
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
@@ -61,8 +61,13 @@ pub struct WanConfig {
     pub host_ip: Ipv4Addr,
     /// The firmware's WAN IP (the connect target).
     pub guest_ip: Ipv4Addr,
+    /// Address assigned to the carrier TAP. This is separate from `guest_ip`
+    /// when the firmware puts its WAN address on a VLAN subinterface.
+    pub carrier_ip: Ipv4Addr,
     /// Prefix length of the shared subnet.
     pub prefix: u8,
+    /// Optional 802.1Q VLAN to put on frames emitted toward the firmware.
+    pub vlan_id: Option<u16>,
     /// MAC for the smoltcp side (locally administered).
     pub mac: [u8; 6],
 }
@@ -73,7 +78,9 @@ impl WanConfig {
             iface,
             host_ip,
             guest_ip,
+            carrier_ip: guest_ip,
             prefix,
+            vlan_id: None,
             mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }
     }
@@ -225,6 +232,94 @@ impl Device for TeeDevice {
     }
 }
 
+/// Add/remove an 802.1Q tag around the smoltcp view of an Ethernet device.
+///
+/// A firmware WAN can be a VLAN subinterface while the guest agent owns the
+/// untagged carrier TAP. The tee must continue exposing the original frames to
+/// the raw-L2 peer, so tagging belongs in this smoltcp-only adapter rather than
+/// in `TeeDevice`.
+struct VlanDevice {
+    inner: TeeDevice,
+    vlan_id: Option<u16>,
+}
+
+struct VlanRxToken<R: RxToken> {
+    inner: R,
+    vlan_id: Option<u16>,
+}
+
+struct VlanTxToken<T: TxToken> {
+    inner: T,
+    vlan_id: Option<u16>,
+}
+
+impl<R: RxToken> RxToken for VlanRxToken<R> {
+    fn consume<Re, F: FnOnce(&[u8]) -> Re>(self, f: F) -> Re {
+        let vlan_id = self.vlan_id;
+        self.inner.consume(|frame| {
+            if let Some(vlan_id) = vlan_id {
+                if frame.len() >= 18
+                    && frame[12..14] == [0x81, 0x00]
+                    && (u16::from_be_bytes([frame[14], frame[15]]) & 0x0fff) == vlan_id
+                {
+                    let mut untagged = Vec::with_capacity(frame.len() - 4);
+                    untagged.extend_from_slice(&frame[..12]);
+                    untagged.extend_from_slice(&frame[16..]);
+                    return f(&untagged);
+                }
+            }
+            f(frame)
+        })
+    }
+}
+
+impl<T: TxToken> TxToken for VlanTxToken<T> {
+    fn consume<Re, F: FnOnce(&mut [u8]) -> Re>(self, len: usize, f: F) -> Re {
+        let Some(vlan_id) = self.vlan_id else {
+            return self.inner.consume(len, f);
+        };
+
+        // Give smoltcp its normal untagged frame, then insert the VLAN header
+        // into the larger buffer owned by the underlying TAP token.
+        self.inner.consume(len + 4, |out| {
+            let mut untagged = vec![0u8; len];
+            let result = f(&mut untagged);
+            if untagged.len() >= 14 {
+                out[..12].copy_from_slice(&untagged[..12]);
+                out[12..14].copy_from_slice(&[0x81, 0x00]);
+                out[14..16].copy_from_slice(&(vlan_id & 0x0fff).to_be_bytes());
+                out[16..16 + len - 12].copy_from_slice(&untagged[12..]);
+            }
+            result
+        })
+    }
+}
+
+impl Device for VlanDevice {
+    type RxToken<'a> = VlanRxToken<<TeeDevice as Device>::RxToken<'a>> where Self: 'a;
+    type TxToken<'a> = VlanTxToken<<TeeDevice as Device>::TxToken<'a>> where Self: 'a;
+
+    fn receive(&mut self, timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        self.inner.receive(timestamp).map(|(rx, tx)| {
+            (
+                VlanRxToken { inner: rx, vlan_id: self.vlan_id },
+                VlanTxToken { inner: tx, vlan_id: self.vlan_id },
+            )
+        })
+    }
+
+    fn transmit(&mut self, timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
+        self.inner.transmit(timestamp).map(|tx| VlanTxToken {
+            inner: tx,
+            vlan_id: self.vlan_id,
+        })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        self.inner.capabilities()
+    }
+}
+
 /// Per-connection bookkeeping on the stack thread.
 struct Conn {
     started: StdInstant,
@@ -279,9 +374,13 @@ fn run_stack(
         }
     };
     let fd = tuntap.as_raw_fd();
-    let mut device = TeeDevice {
+    let tee = TeeDevice {
         inner: tuntap,
         rx_tap: None,
+    };
+    let mut device = VlanDevice {
+        inner: tee,
+        vlan_id: cfg.vlan_id,
     };
 
     // smoltcp creates the tap but leaves it admin-DOWN. Writing to a down tap
@@ -293,16 +392,20 @@ fn run_stack(
         warn!("could not bring '{}' up ({e}); WAN writes may fail", cfg.iface);
     }
 
-    // Assign the configured guest IP to the interface so the guest kernel has a
-    // local address on this segment (turnkey: many firmwares don't actually bring
-    // their WAN up under emulation, so connections to guest_ip would otherwise hit
-    // no local IP and never reach a listener). nvram should set the same address,
-    // so this is idempotent on firmwares that do configure it.
-    if let Err(e) = set_ip_addr(&cfg.iface, cfg.guest_ip, cfg.prefix) {
-        warn!(
-            "could not assign {}/{} to '{}' ({e}); firmware must configure it",
-            cfg.guest_ip, cfg.prefix, cfg.iface
-        );
+    // In VLAN mode the carrier must stay unnumbered: the firmware owns the WAN
+    // address on its VLAN subinterface, not on the parent. Numbering the parent
+    // as well creates two competing L3 identities and does not match the physical
+    // switch topology. Retain the compatibility assignment for untagged
+    // firmwares that do not configure their WAN address.
+    if cfg.vlan_id.is_none() {
+        if let Err(e) = set_ip_addr(&cfg.iface, cfg.carrier_ip, cfg.prefix) {
+            warn!(
+                "could not assign {}/{} to '{}' ({e}); firmware must configure it",
+                cfg.carrier_ip, cfg.prefix, cfg.iface
+            );
+        }
+    } else {
+        info!(iface = cfg.iface, vlan_id = ?cfg.vlan_id, "leaving VLAN carrier unnumbered");
     }
 
     let base = StdInstant::now();
@@ -326,6 +429,8 @@ fn run_stack(
         iface = cfg.iface,
         host_ip = %cfg.host_ip,
         guest_ip = %cfg.guest_ip,
+        carrier_ip = %cfg.carrier_ip,
+        vlan_id = ?cfg.vlan_id,
         "WAN stack up"
     );
 
@@ -352,7 +457,7 @@ fn run_stack(
                     let (to_tap_tx, to_tap_rx) = mpsc::unbounded_channel::<Vec<u8>>();
                     let (from_tap_tx, from_tap_rx) = mpsc::unbounded_channel::<Vec<u8>>();
                     l2_inject = Some(to_tap_rx);
-                    device.rx_tap = Some(from_tap_tx);
+                    device.inner.rx_tap = Some(from_tap_tx);
                     info!(iface = cfg.iface, "L2 bridge session opened");
                     let _ = resp.send(Ok(L2Conn {
                         to_tap: to_tap_tx,
@@ -402,7 +507,7 @@ fn run_stack(
             }
             if disconnected {
                 l2_inject = None;
-                device.rx_tap = None;
+                device.inner.rx_tap = None;
                 info!("L2 bridge session closed");
             }
         }
