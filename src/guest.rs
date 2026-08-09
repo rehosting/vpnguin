@@ -68,28 +68,36 @@ pub async fn execute(command: &Guest) -> Result<()> {
     }
     let ifaces = Arc::new(ifaces);
 
-    // Lower-layer datapaths get their own vsock ports: raw L3 (whole IP packets)
-    // on command_port+1. Bound unconditionally — inert unless a host connects and
-    // names an owned interface.
-    let raw_l3 = VsockListener::bind(VsockAddr::new(
-        command.context_id,
-        command.command_port + 1,
-    ))
-    .context("unable to bind raw-L3 vsock listener")?;
-    {
-        let ifaces = ifaces.clone();
-        tokio::spawn(async move { accept_raw_l3(raw_l3, ifaces).await });
-    }
+    // Lower-layer datapaths (raw L3 on command_port+1, raw L2 on command_port+2)
+    // exist only to carry traffic for owned interfaces. Bind them ONLY when at
+    // least one interface is owned. Without owned interfaces they would be inert
+    // anyway, and binding them unconditionally is not backwards-compatible: it
+    // grows the agent's vsock footprint from one port to three for every guest,
+    // and a failure to bind either extra port is fatal (`?`) — which silently
+    // killed the whole agent on targets where those ports aren't free, taking
+    // the default loopback exposure down with it. Gating keeps the no-interfaces
+    // path byte-identical to the pre-owned-interface agent.
+    if !ifaces.is_empty() {
+        let raw_l3 = VsockListener::bind(VsockAddr::new(
+            command.context_id,
+            command.command_port + 1,
+        ))
+        .context("unable to bind raw-L3 vsock listener")?;
+        {
+            let ifaces = ifaces.clone();
+            tokio::spawn(async move { accept_raw_l3(raw_l3, ifaces).await });
+        }
 
-    // Raw L2 (whole Ethernet frames) on command_port+2.
-    let raw_l2 = VsockListener::bind(VsockAddr::new(
-        command.context_id,
-        command.command_port + 2,
-    ))
-    .context("unable to bind raw-L2 vsock listener")?;
-    {
-        let ifaces = ifaces.clone();
-        tokio::spawn(async move { accept_raw_l2(raw_l2, ifaces).await });
+        // Raw L2 (whole Ethernet frames) on command_port+2.
+        let raw_l2 = VsockListener::bind(VsockAddr::new(
+            command.context_id,
+            command.command_port + 2,
+        ))
+        .context("unable to bind raw-L2 vsock listener")?;
+        {
+            let ifaces = ifaces.clone();
+            tokio::spawn(async move { accept_raw_l2(raw_l2, ifaces).await });
+        }
     }
 
     loop {
